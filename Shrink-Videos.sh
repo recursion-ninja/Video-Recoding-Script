@@ -97,8 +97,9 @@ recode() {
     local counter_prefix="$4"
     local video_filepath="$5"
     local video_filename=$(basename "$video_filepath")
+    local video_nicename=${video_filename%.*}
 
-    report 'loud' "${counter_prefix}:\t$video_filename"
+    report 'loud' "${counter_prefix}:\t$video_nicename"
 
     local original_bytes=$(du -b "$video_filepath" | cut -d$'\t' -f 1)
     local original_human=$(du -h "$video_filepath" | cut -d$'\t' -f 1)
