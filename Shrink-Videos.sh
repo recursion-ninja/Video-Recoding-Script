@@ -116,6 +116,8 @@ recode() {
 
     if [ $PROVIDED_VERBIAGE -ge 4 ]; then
         report 'tech' 'Statistics:\n'
+        local counter_string="${counter_prefix}"
+        local whitespace_pad=$(printf "%*s" ${#counter_string} "")
         local recoding_phase=$(timespanned $initiation $completion)
         local shrunken_bytes=$(du -b "$buffer_address" | cut -d$'\t' -f 1)
         local shrunken_human=$(du -h "$buffer_address" | cut -d$'\t' -f 1)
@@ -127,7 +129,7 @@ recode() {
         report 'tech' "\tsquashed_bytes:\t$squashed_bytes"
         local size_reduction=$(bc -l <<<"(100*$squashed_bytes)/$original_bytes")
         local nicely_rounded=$(printf %.2f%% $size_reduction)
-        local display_result=$(printf "\t%s    %s / %s    %s\n" "$recoding_phase" "$shrunken_human" "$original_human" "$nicely_rounded")
+        local display_result=$(printf "%s\t%s    %s / %s    %s\n" "$whitespace_pad" "$recoding_phase" "$shrunken_human" "$original_human" "$nicely_rounded")
         report 'loud' "$display_result\n"
     fi
 
