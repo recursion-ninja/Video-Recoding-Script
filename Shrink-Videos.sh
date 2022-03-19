@@ -76,14 +76,14 @@ enumerate() {
 
     local file_info_pairs=$(jq -c -r '.format.filename as $path | .format.size as $size | .streams[]? | select(.codec_type=="video" and .codec_name!="hevc") | [$size, $path] | @tsv' <<<"$json")
 
-    local descending_size=$(sort -hru <<<"$file_info_pairs")        # Sort by 1st field (file size)
-    local filepaths_alone=$(cut -d$'\t' -f 2 <<<"$descending_size") # Extract 2nd field (file name)
-    local filepaths_dense=$(sed '/^$/d' <<<"$filepaths_alone")      # Remove any empty lines
+    local descending_size=$(( sort -hru        ) <<<"$file_info_pairs") # Sort by 1st field (file size)
+    local filepaths_alone=$(( cut -d$'\t' -f 2 ) <<<"$descending_size") # Extract 2nd field (file name)
+    local filepaths_dense=$(( sed '/^$/d'      ) <<<"$filepaths_alone") # Remove any empty lines
     local filepaths_final=$filepaths_dense
 
     report 'tech' "Found files:\n$filepaths_final"
 
-    eval $result="\"$filepaths_final\""
+    eval $result=$(printf "%q" "${filepaths_final}")
 }
 
 
@@ -92,26 +92,27 @@ recode() {
     report 'tech' "Entering function call: 'recode'"
     
     local return_pointer=$1
-    local byte_prune_sum="$2"
-    local buffer_address="$3"
-    local counter_prefix="$4"
-    local video_filepath="$5"
-    local video_filename=$(basename "$video_filepath")
+    local byte_prune_sum="${2}"
+    local buffer_address="${3}"
+    local counter_prefix="${4}"
+    local video_filepath="${5}"
+    local video_filename=$(basename "${video_filepath}")
     local video_nicename=${video_filename%.*}
 
     report 'loud' "${counter_prefix}:\t$video_nicename"
 
-    local original_bytes=$(du -b "$video_filepath" | cut -d$'\t' -f 1)
-    local original_human=$(du -h "$video_filepath" | cut -d$'\t' -f 1)
+    local original_bytes=$(du -b "${video_filepath}" | cut -d$'\t' -f 1)
+    local original_human=$(du -h "${video_filepath}" | cut -d$'\t' -f 1)
     local initiation=$(date +%s)
 
-    ffmpeg $FFMPEG_DISPLAY_OPTIONS -i "$video_filepath" $FFMPEG_ENCODER_OPTIONS "$buffer_address" &> /dev/null;
+    output=$(ffmpeg $FFMPEG_DISPLAY_OPTIONS -i "${video_filepath}" $FFMPEG_ENCODER_OPTIONS "$buffer_address" 2>&1);
     status=$?
 
     local completion=$(date +%s)
 
     if [ $status -ne 0 ]; then
-        report 'warn' "Error \t$video_filename"
+        report 'warn' "Error \t${video_filename}"
+        echo $output
         return 1;
     fi
 
@@ -198,14 +199,14 @@ enumerate VIDEO_SHRINKING_INPUTS
 
 # 3rd:
 # Note starting file size statistics for subsequent reporting.
-VIDEO_START_FILE_HUMAN=$((tr \\n \\0 | xargs -0 du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"$VIDEO_SHRINKING_INPUTS")
-VIDEO_START_FILE_BYTES=$((tr \\n \\0 | xargs -0 du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"$VIDEO_SHRINKING_INPUTS")
+VIDEO_START_FILE_HUMAN=$((tr \\n \\0 | xargs -0 printf "%q" | tail -n +1 | du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_START_FILE_BYTES=$((tr \\n \\0 | xargs -0 printf "%q" | tail -n +1 | du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
 VIDEO_PRUNE_FILE_BYTES=0
 
 # 4th:
 # Precompute pretty printing variables.
-RECODE_OVERALL=$(   wc -l <<<"$VIDEO_SHRINKING_INPUTS")
-RECODE_MAXIMUM=$(($(wc -c <<<"$RECODE_OVERALL") - 1))
+RECODE_OVERALL=$(   wc -l <<<"${VIDEO_SHRINKING_INPUTS}")
+RECODE_MAXIMUM=$(($(wc -c <<<"${RECODE_OVERALL}") - 1))
 RECODE_CURRENT=0
 RECODE_SUCCESS=0
 
@@ -222,16 +223,18 @@ else
 fi
 RECODE_BEGINNING=$(date +%s)
 while read -r -u 9 FILEPATH || [ -n "$FILEPATH" ];
+#while IFS= read -r -u 9 -d $'\0' FILEPATH || [ -n "$FILEPATH" ];
 do
     ((RECODE_CURRENT+=1))
     COUNTER_PREFIX=$(printf "%${RECODE_MAXIMUM}d/%d" $RECODE_CURRENT $RECODE_OVERALL)
-    recode VIDEO_PRUNE_FILE_BYTES "$VIDEO_PRUNE_FILE_BYTES" "$VIDEO_SHRINKING_BUFFER" "$COUNTER_PREFIX" "$FILEPATH"
+    recode VIDEO_PRUNE_FILE_BYTES "${VIDEO_PRUNE_FILE_BYTES}" "${VIDEO_SHRINKING_BUFFER}" "${COUNTER_PREFIX}" "${FILEPATH}"
     status=$?
     if [ $status -eq 0 ]; then
         ((RECODE_SUCCESS+=1))         
     fi
      
-done 9<<< "$VIDEO_SHRINKING_INPUTS";
+done 9<<<"${VIDEO_SHRINKING_INPUTS}";
+#done 9<<<$((tr \\n \\0 | xargs -0 printf "%q" | tail -n +1) <<<"${VIDEO_SHRINKING_INPUTS}")    
 RECODE_CONCLUDED=$(date +%s)
 RECODE_RUNPERIOD=$(timespanned $RECODE_BEGINNING $RECODE_CONCLUDED)
 
