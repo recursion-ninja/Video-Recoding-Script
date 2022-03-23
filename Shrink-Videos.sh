@@ -4,7 +4,7 @@ trap "cleanup VIDEO_SHRINKING_BUFFER" ERR EXIT INT QUIT TERM
 
 # Global Constants.
 FFMPEG_DISPLAY_OPTIONS='-y -hide_banner -loglevel fatal -nostats'
-FFMPEG_ENCODER_OPTIONS='-c:v libx265 -x265-params log-level=none -b:v 0'
+FFMPEG_ENCODER_OPTIONS='-c:v libx265 -x265-params log-level=none -max_muxing_queue_size 4096 -b:v 0'
 VIDEO_SHRINKING_STRUCT='Shrink-Videos-Buffer.XXXX.mkv'
 VIDEO_EXTENTIONS_TABLE='webm|mkv|flv|vob|ogv|ogg|rrc|gifv|mng|mov|avi|qt|wmv|yuv|rm|asf|amv|mp4|m4p|m4v|mpg|mp2|mpeg|mpe|mpv|m4v|svi|3gp|3g2|mxf|roq|nsv|flv|f4v|f4p|f4a|f4b'
 
