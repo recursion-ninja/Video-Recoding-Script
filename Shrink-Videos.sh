@@ -11,7 +11,7 @@ VIDEO_EXTENTIONS_TABLE='webm|mkv|flv|vob|ogv|ogg|rrc|gifv|mng|mov|avi|qt|wmv|yuv
 
 # Command line argument derived variables.
 PROVIDED_FILEPATH='.' # Default to current working directory
-PROVIDED_VERBIAGE=3   # Default to moderate verbosity: [0,5] -> [QUIET, ERROR, WARNS, INFOS, EXTRA, DEBUG]
+PROVIDED_VERBIAGE=5   # Default to moderate verbosity: [0,5] -> [QUIET, ERROR, WARNS, INFOS, EXTRA, DEBUG]
 
 
 # General purpose function for standardized output.
@@ -61,29 +61,29 @@ parse() {
 enumerate() {
     report 'tech' "Entering function call: 'enumerate'"
 
-    local result=$1
+    local descending_size ffprobe_options file_extensions file_info_pairs \
+          filepaths_alone filepaths_dense filepaths_final json 
+    
+    file_extensions="${VIDEO_EXTENTIONS_TABLE//|/\\|}"
+    ffprobe_options='-v quiet -show_streams -show_format -of json {} ;'
 
-    local file_extensions=$(echo "$VIDEO_EXTENTIONS_TABLE" | sed -e 's/|/\\|/g')
-    local find_file_prune=$(echo "-type f -iregex '.*\.\(${file_extensions}\)\$' -exec")
-    local ffprobe_options='-v quiet -show_streams -show_format -of json {} ;'
+    report 'tech' "Extensions expanded: ${file_extensions}"
 
-    report 'tech' "Extensions expanded: $file_extensions"
+    json=$(find "${PROVIDED_FILEPATH}" \
+        -type f \
+        -iregex ".*\.\(${file_extensions}\)\$" \
+        -exec ffprobe $ffprobe_options)
 
-    local json=$(find "${PROVIDED_FILEPATH}" \
-                      -type f \
-                      -iregex ".*\.\(${file_extensions}\)\$" \
-                      -exec ffprobe $ffprobe_options)
+    file_info_pairs=$(jq -c -r '.format.filename as $path | .format.size as $size | .streams[]? | select(.codec_type=="video" and .codec_name!="hevc") | [$size, $path] | @tsv' <<<"$json")
 
-    local file_info_pairs=$(jq -c -r '.format.filename as $path | .format.size as $size | .streams[]? | select(.codec_type=="video" and .codec_name!="hevc") | [$size, $path] | @tsv' <<<"$json")
-
-    local descending_size=$(( sort -hru        ) <<<"$file_info_pairs") # Sort by 1st field (file size)
-    local filepaths_alone=$(( cut -d$'\t' -f 2 ) <<<"$descending_size") # Extract 2nd field (file name)
-    local filepaths_dense=$(( sed '/^$/d'      ) <<<"$filepaths_alone") # Remove any empty lines
-    local filepaths_final=$filepaths_dense
+    descending_size=$( ( sort -hru        ) <<<"$file_info_pairs") # Sort by 1st field (file size)
+    filepaths_alone=$( ( cut -d$'\t' -f 2 ) <<<"$descending_size") # Extract 2nd field (file name)
+    filepaths_dense=$( ( sed '/^$/d'      ) <<<"$filepaths_alone") # Remove any empty lines
+    filepaths_final=$filepaths_dense
 
     report 'tech' "Found files:\n$filepaths_final"
 
-    eval $result=$(printf "%q" "${filepaths_final}")
+    VIDEO_SHRINKING_INPUTS="${filepaths_final}"
 }
 
 
@@ -91,59 +91,64 @@ enumerate() {
 recode() {
     report 'tech' "Entering function call: 'recode'"
     
-    local return_pointer=$1
+    local result=$1
     local byte_prune_sum="${2}"
     local buffer_address="${3}"
     local counter_prefix="${4}"
     local video_filepath="${5}"
-    local video_filename=$(basename "${video_filepath}")
-    local video_nicename=${video_filename%.*}
+
+    local completion initiation original_bytes original_human video_filename video_nicename
+
+    video_filename=$(basename "${video_filepath}")
+    video_nicename=${video_filename%.*}
 
     report 'loud' "${counter_prefix}:\t$video_nicename"
 
-    local original_bytes=$(du -b "${video_filepath}" | cut -d$'\t' -f 1)
-    local original_human=$(du -h "${video_filepath}" | cut -d$'\t' -f 1)
-    local initiation=$(date +%s)
+    original_bytes=$(du -b "${video_filepath}" | cut -d$'\t' -f 1)
+    original_human=$(du -h "${video_filepath}" | cut -d$'\t' -f 1)
+    initiation=$(date +%s)
 
-    output=$(ffmpeg $FFMPEG_DISPLAY_OPTIONS -i "${video_filepath}" $FFMPEG_ENCODER_OPTIONS "$buffer_address" 2>&1);
+    output=$(ffmpeg ${FFMPEG_DISPLAY_OPTIONS} -i "${video_filepath}" ${FFMPEG_ENCODER_OPTIONS} "${buffer_address}" 2>&1);
     status=$?
 
-    local completion=$(date +%s)
+    completion=$(date +%s)
 
     if [ $status -ne 0 ]; then
         report 'warn' "Error \t${video_filename}"
-        echo $output
+        echo "${output}"
         return 1;
     fi
 
     if [ $PROVIDED_VERBIAGE -ge 4 ]; then
+        local counter_string display_result nicely_rounded recoding_phase \
+              shrunken_bytes shrunken_human size_reduction squashed_bytes whitespace_pad
+        counter_string="${counter_prefix}"
+        whitespace_pad=$(printf "%*s" ${#counter_string} "")
+        recoding_phase=$(timespanned "${initiation}" "${completion}")
+        shrunken_bytes=$(du -b "${buffer_address}" | cut -d$'\t' -f 1)
+        shrunken_human=$(du -h "${buffer_address}" | cut -d$'\t' -f 1)
+        squashed_bytes=$((original_bytes-shrunken_bytes))
         report 'tech' 'Statistics:\n'
-        local counter_string="${counter_prefix}"
-        local whitespace_pad=$(printf "%*s" ${#counter_string} "")
-        local recoding_phase=$(timespanned $initiation $completion)
-        local shrunken_bytes=$(du -b "$buffer_address" | cut -d$'\t' -f 1)
-        local shrunken_human=$(du -h "$buffer_address" | cut -d$'\t' -f 1)
-        local squashed_bytes=$((original_bytes-shrunken_bytes))
-        report 'tech' "\toriginal_bytes:\t$original_bytes"
-        report 'tech' "\toriginal_human:\t$original_human"
-        report 'tech' "\tshrunken_bytes:\t$shrunken_bytes"
-        report 'tech' "\tshrunken_human:\t$shrunken_human"
-        report 'tech' "\tsquashed_bytes:\t$squashed_bytes"
-        local size_reduction=$(bc -l <<<"(100*$squashed_bytes)/$original_bytes")
-        local nicely_rounded=$(printf %.2f%% $size_reduction)
-        local display_result=$(printf "%s\t%s    %s / %s    %s\n" "$whitespace_pad" "$recoding_phase" "$shrunken_human" "$original_human" "$nicely_rounded")
-        report 'loud' "$display_result\n"
+        report 'tech' "\toriginal_bytes:\t${original_bytes}"
+        report 'tech' "\toriginal_human:\t${original_human}"
+        report 'tech' "\tshrunken_bytes:\t${shrunken_bytes}"
+        report 'tech' "\tshrunken_human:\t${shrunken_human}"
+        report 'tech' "\tsquashed_bytes:\t${squashed_bytes}"
+        size_reduction=$(bc -l <<<"(100*${squashed_bytes})/${original_bytes}")
+        nicely_rounded=$(printf %.2f%% "${size_reduction}")
+        display_result=$(printf "%s\t%s    %s / %s    %s\n" "${whitespace_pad}" "${recoding_phase}" "${shrunken_human}" "${original_human}" "${nicely_rounded}")
+        report 'loud' "${display_result}\n"
     fi
 
     report 'tech' 'Moving buffer to:'
     report 'tech' "${video_filepath%.*}.mkv"
-    report 'tech' "mv $buffer_address ${video_filepath%.*}.mkv"
+    report 'tech' "mv ${buffer_address} ${video_filepath%.*}.mkv"
 
-    rm -f "$video_filepath"
-    mv "$buffer_address" "${video_filepath%.*}.mkv"
+    rm -f "${video_filepath}"
+    mv "${buffer_address}" "${video_filepath%.*}.mkv"
 
     ((byte_prune_sum+=squashed_bytes))
-    eval $return_pointer="\"$byte_prune_sum\""
+    eval "${result}"="\"${byte_prune_sum}\""
     return 0;
 }
 
@@ -166,12 +171,13 @@ setup() {
     report 'tech' "Entering function call: 'setup'"
 
     local result=$1
-    local buffer=$(mktemp -t $VIDEO_SHRINKING_STRUCT)
-    touch $buffer
+    local buffer
+    buffer=$(mktemp -t ${VIDEO_SHRINKING_STRUCT})
+    touch "${buffer}"
     
-    report 'tech' "Buffer file created: $buffer"
-    
-    eval $result="\"$buffer\""
+    report 'tech' "Buffer file created: ${buffer}"
+
+    eval "${result}"="\"${buffer}\""
 }
 
 
@@ -180,9 +186,10 @@ cleanup () {
     code=$?
     report 'tech' "Entering function call: 'cleanup'"
 
-    local buffer=$(eval "echo \$$1")
-    rm -rf "$buffer"
-    report 'tech' "Buffer file removed: $buffer"
+    local buffer
+    buffer=$(eval "echo \$$1")
+    rm -rf "${buffer}"
+    report 'tech' "Buffer file removed: ${buffer}"
     if [[ $code -ne 0 ]]; then
         exit $code
     fi
@@ -195,12 +202,13 @@ parse "$@"
 
 # 2nd:
 # Determine the whther or not subscription information is available.
-enumerate VIDEO_SHRINKING_INPUTS
+enumerate
 
 # 3rd:
 # Note starting file size statistics for subsequent reporting.
-VIDEO_START_FILE_HUMAN=$((tr \\n \\0 | xargs -0 printf "%q" | tail -n +1 | du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
-VIDEO_START_FILE_BYTES=$((tr \\n \\0 | xargs -0 printf "%q" | tail -n +1 | du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+#VIDEO_START_FILE_HUMAN=$( (tr \\n \\0 | xargs -0 printf "%q" | tail -n +1 | du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_START_FILE_HUMAN=$( (xargs -d$'\n' du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_START_FILE_BYTES=$( (xargs -d$'\n' du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
 VIDEO_PRUNE_FILE_BYTES=0
 
 # 4th:
@@ -223,10 +231,9 @@ else
 fi
 RECODE_BEGINNING=$(date +%s)
 while read -r -u 9 FILEPATH || [ -n "$FILEPATH" ];
-#while IFS= read -r -u 9 -d $'\0' FILEPATH || [ -n "$FILEPATH" ];
 do
     ((RECODE_CURRENT+=1))
-    COUNTER_PREFIX=$(printf "%${RECODE_MAXIMUM}d/%d" $RECODE_CURRENT $RECODE_OVERALL)
+    COUNTER_PREFIX=$(printf "%${RECODE_MAXIMUM}d/%d" "${RECODE_CURRENT}" "${RECODE_OVERALL}")
     recode VIDEO_PRUNE_FILE_BYTES "${VIDEO_PRUNE_FILE_BYTES}" "${VIDEO_SHRINKING_BUFFER}" "${COUNTER_PREFIX}" "${FILEPATH}"
     status=$?
     if [ $status -eq 0 ]; then
@@ -234,22 +241,21 @@ do
     fi
      
 done 9<<<"${VIDEO_SHRINKING_INPUTS}";
-#done 9<<<$((tr \\n \\0 | xargs -0 printf "%q" | tail -n +1) <<<"${VIDEO_SHRINKING_INPUTS}")    
 RECODE_CONCLUDED=$(date +%s)
-RECODE_RUNPERIOD=$(timespanned $RECODE_BEGINNING $RECODE_CONCLUDED)
+RECODE_RUNPERIOD=$(timespanned "${RECODE_BEGINNING}" "${RECODE_CONCLUDED}")
 
 # 7th:
 # Report the final results.
-report 'info' "Successfully re-encoded $RECODE_SUCCESS/$RECODE_OVERALL videos!"
+report 'info' "Successfully re-encoded ${RECODE_SUCCESS}/${RECODE_OVERALL} videos!"
 
 if [ $PROVIDED_VERBIAGE -ge 4 ]; then
-    VIDEO_PRUNE_FILE_HUMAN=$(numfmt --to=iec "$VIDEO_PRUNE_FILE_BYTES")
+    VIDEO_PRUNE_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_PRUNE_FILE_BYTES}")
     VIDEO_SMALL_FILE_BYTES=$((VIDEO_START_FILE_BYTES-VIDEO_PRUNE_FILE_BYTES))
-    VIDEO_SMALL_FILE_HUMAN=$(numfmt --to=iec "$VIDEO_SMALL_FILE_BYTES")
-    VIDEO_RATIO_FILE_BYTES=$(bc -l <<<"(100*$VIDEO_PRUNE_FILE_BYTES)/$VIDEO_START_FILE_BYTES")
-    VIDEO_RATIO_FILE_HUMAN=$(printf %.2f%% $VIDEO_RATIO_FILE_BYTES)
-    report 'loud' "Processing elapsed for a total duration of $RECODE_RUNPERIOD"
-    report 'loud' "Re-encoding removed $VIDEO_PRUNE_FILE_HUMAN, reducing total file size by $VIDEO_RATIO_FILE_HUMAN ( $VIDEO_SMALL_FILE_HUMAN / $VIDEO_START_FILE_HUMAN )"
+    VIDEO_SMALL_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_SMALL_FILE_BYTES}")
+    VIDEO_RATIO_FILE_BYTES=$(bc -l <<<"(100*${VIDEO_PRUNE_FILE_BYTES})/${VIDEO_START_FILE_BYTES}")
+    VIDEO_RATIO_FILE_HUMAN=$(printf %.2f%% "${VIDEO_RATIO_FILE_BYTES}")
+    report 'loud' "Processing elapsed for a total duration of ${RECODE_RUNPERIOD}"
+    report 'loud' "Re-encoding removed ${VIDEO_PRUNE_FILE_HUMAN}, reducing total file size by ${VIDEO_RATIO_FILE_HUMAN} ( ${VIDEO_SMALL_FILE_HUMAN} / ${VIDEO_START_FILE_HUMAN} )"
 fi
 
 # 8th:
