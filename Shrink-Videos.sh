@@ -11,7 +11,7 @@ VIDEO_EXTENTIONS_TABLE='webm|mkv|flv|vob|ogv|ogg|rrc|gifv|mng|mov|avi|qt|wmv|yuv
 
 # Command line argument derived variables.
 PROVIDED_FILEPATH='.' # Default to current working directory
-PROVIDED_VERBIAGE=5   # Default to moderate verbosity: [0,5] -> [QUIET, ERROR, WARNS, INFOS, EXTRA, DEBUG]
+PROVIDED_VERBIAGE=3   # Default to moderate verbosity: [0,5] -> [QUIET, ERROR, WARNS, INFOS, EXTRA, DEBUG]
 
 
 # General purpose function for standardized output.
