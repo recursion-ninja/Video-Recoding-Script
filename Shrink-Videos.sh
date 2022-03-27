@@ -2,13 +2,6 @@
 trap "cleanup VIDEO_SHRINKING_BUFFER" ERR EXIT INT QUIT TERM
 
 
-# Global Constants.
-FFMPEG_DISPLAY_OPTIONS='-y -hide_banner -loglevel fatal -nostats'
-FFMPEG_ENCODER_OPTIONS='-c:v libx265 -x265-params log-level=none -max_muxing_queue_size 4096 -b:v 0'
-VIDEO_SHRINKING_STRUCT='Shrink-Videos-Buffer.XXXX.mkv'
-VIDEO_EXTENTIONS_TABLE='webm|mkv|flv|vob|ogv|ogg|rrc|gifv|mng|mov|avi|qt|wmv|yuv|rm|asf|amv|mp4|m4p|m4v|mpg|mp2|mpeg|mpe|mpv|m4v|svi|3gp|3g2|mxf|roq|nsv|flv|f4v|f4p|f4a|f4b'
-
-
 # Command line argument derived variables.
 PROVIDED_FILEPATH='.' # Default to current working directory
 PROVIDED_VERBIAGE=3   # Default to moderate verbosity: [0,5] -> [QUIET, ERROR, WARNS, INFOS, EXTRA, DEBUG]
@@ -62,9 +55,10 @@ enumerate() {
     report 'tech' "Entering function call: 'enumerate'"
 
     local descending_size ffprobe_options file_extensions file_info_pairs \
-          filepaths_alone filepaths_dense filepaths_final json 
+          filepaths_alone filepaths_dense filepaths_final json video_exts_list
     
-    file_extensions="${VIDEO_EXTENTIONS_TABLE//|/\\|}"
+    video_exts_list='webm|mkv|flv|vob|ogv|ogg|rrc|gifv|mng|mov|avi|qt|wmv|yuv|rm|asf|amv|mp4|m4p|m4v|mpg|mp2|mpeg|mpe|mpv|m4v|svi|3gp|3g2|mxf|roq|nsv|flv|f4v|f4p|f4a|f4b'
+    file_extensions="${video_exts_list//|/\\|}"
     ffprobe_options='-v quiet -show_streams -show_format -of json {} ;'
 
     report 'tech' "Extensions expanded: ${file_extensions}"
@@ -108,15 +102,24 @@ recode() {
     original_human=$(du -h "${video_filepath}" | cut -d$'\t' -f 1)
     initiation=$(date +%s)
 
-    output=$(ffmpeg ${FFMPEG_DISPLAY_OPTIONS} -i "${video_filepath}" ${FFMPEG_ENCODER_OPTIONS} "${buffer_address}" 2>&1);
-    status=$?
+    local FFMPEG_DISPLAY_OPTIONS='-y -hide_banner -loglevel error -nostats'
+    local FFMPEG_ENCODER_OPTIONS='-c:v libx265 -x265-params log-level=error -max_muxing_queue_size 4096 -b:v 0'
+    local FFMPEG_SCALING_OPTIONS='-vf crop=trunc(iw/2)*2:trunc(ih/2)*2'
 
+    output=$(ffmpeg \
+        ${FFMPEG_DISPLAY_OPTIONS} \
+        -i "${video_filepath}" \
+        ${FFMPEG_ENCODER_OPTIONS} \
+        ${FFMPEG_SCALING_OPTIONS} \
+        "${buffer_address}" 2>&1);
+    status=$?
     completion=$(date +%s)
 
     if [ $status -ne 0 ]; then
+        RECODE_VERDICT=${RECODE_FAILURE}
         report 'warn' "Error \t${video_filename}"
-        echo "${output}"
-        return 1;
+        report 'loud' "${output}"
+        return 0;
     fi
 
     if [ $PROVIDED_VERBIAGE -ge 4 ]; then
@@ -127,7 +130,7 @@ recode() {
         recoding_phase=$(timespanned "${initiation}" "${completion}")
         shrunken_bytes=$(du -b "${buffer_address}" | cut -d$'\t' -f 1)
         shrunken_human=$(du -h "${buffer_address}" | cut -d$'\t' -f 1)
-        squashed_bytes=$((original_bytes-shrunken_bytes))
+        squashed_bytes=$(( original_bytes-shrunken_bytes ))
         report 'tech' 'Statistics:\n'
         report 'tech' "\toriginal_bytes:\t${original_bytes}"
         report 'tech' "\toriginal_human:\t${original_human}"
@@ -147,9 +150,9 @@ recode() {
     rm -f "${video_filepath}"
     mv "${buffer_address}" "${video_filepath%.*}.mkv"
 
-    ((byte_prune_sum+=squashed_bytes))
+    (( byte_prune_sum+=squashed_bytes ))
     eval "${result}"="\"${byte_prune_sum}\""
-    return 0;
+    RECODE_VERDICT=${RECODE_SUCCESS}
 }
 
 
@@ -157,11 +160,11 @@ recode() {
 timespanned() {
     local B=$1
     local E=$2
-    local T=$((E-B))
-    local D=$((T/60/60/24))
-    local H=$((T/60/60%24))
-    local M=$((T/60%60))
-    local S=$((T%60))
+    local T=$(( E-B ))
+    local D=$(( T/60/60/24 ))
+    local H=$(( T/60/60%24 ))
+    local M=$(( T/60%60    ))
+    local S=$(( T%60       ))
     printf '%02dd %02dh %02dm %02ds\n' $D $H $M $S
 }
 
@@ -171,13 +174,31 @@ setup() {
     report 'tech' "Entering function call: 'setup'"
 
     local result=$1
-    local buffer
-    buffer=$(mktemp -t ${VIDEO_SHRINKING_STRUCT})
+    local buffer struct
+    struct='Shrink-Videos-Buffer.XXXX.mkv'
+    buffer=$(mktemp -t ${struct})
     touch "${buffer}"
     
     report 'tech' "Buffer file created: ${buffer}"
 
     eval "${result}"="\"${buffer}\""
+}
+
+summerize() {
+    # Check if we have started
+    if [[ -n "${RECODE_CURRENT}" ]] && [[ ${RECODE_CURRENT} -gt 0 ]]; then
+        report 'info' "\nSuccessfully re-encoded ${RECODE_UPDATED}/${RECODE_OVERALL} videos!"
+    
+        if [ $PROVIDED_VERBIAGE -ge 4 ]; then
+            VIDEO_PRUNE_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_PRUNE_FILE_BYTES}")
+            VIDEO_SMALL_FILE_BYTES=$(( VIDEO_START_FILE_BYTES-VIDEO_PRUNE_FILE_BYTES ))
+            VIDEO_SMALL_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_SMALL_FILE_BYTES}")
+            VIDEO_RATIO_FILE_BYTES=$(bc -l <<<"(100*${VIDEO_PRUNE_FILE_BYTES})/${VIDEO_START_FILE_BYTES}")
+            VIDEO_RATIO_FILE_HUMAN=$(printf %.2f%% "${VIDEO_RATIO_FILE_BYTES}")
+            report 'loud' "Processing elapsed for a total duration of ${RECODE_RUNPERIOD}"
+            report 'loud' "Re-encoding removed ${VIDEO_PRUNE_FILE_HUMAN}, reducing total file size by ${VIDEO_RATIO_FILE_HUMAN} ( ${VIDEO_SMALL_FILE_HUMAN} / ${VIDEO_START_FILE_HUMAN} )"
+        fi
+    fi
 }
 
 
@@ -190,6 +211,9 @@ cleanup () {
     buffer=$(eval "echo \$$1")
     rm -rf "${buffer}"
     report 'tech' "Buffer file removed: ${buffer}"
+
+    summerize
+
     if [[ $code -ne 0 ]]; then
         exit $code
     fi
@@ -201,7 +225,7 @@ cleanup () {
 parse "$@"
 
 # 2nd:
-# Determine the whther or not subscription information is available.
+# Determine the whether or not subscription information is available.
 enumerate
 
 # 3rd:
@@ -213,16 +237,22 @@ VIDEO_PRUNE_FILE_BYTES=0
 
 # 4th:
 # Precompute pretty printing variables.
-RECODE_OVERALL=$(   wc -l <<<"${VIDEO_SHRINKING_INPUTS}")
-RECODE_MAXIMUM=$(($(wc -c <<<"${RECODE_OVERALL}") - 1))
+RECODE_OVERALL=$(    wc -l <<<"${VIDEO_SHRINKING_INPUTS}")
+RECODE_MAXIMUM=$(( $(wc -c <<<"${RECODE_OVERALL}") - 1 ))
 RECODE_CURRENT=0
-RECODE_SUCCESS=0
+RECODE_UPDATED=0
 
 # 5th:
+# Define re-encoding return result signals
+RECODE_SUCCESS=0
+RECODE_FAILURE=$(( ~(RECODE_SUCCESS) ))
+RECODE_VERDICT=${RECODE_FAILURE}
+
+# 6th:
 # Setup a temporary workspace.
 setup VIDEO_SHRINKING_BUFFER
 
-# 6th:
+# 7th:
 # Re-encode all applicable video files which were located.
 if [ $PROVIDED_VERBIAGE -ge 4 ]; then
     report 'loud' "Re-encoding $VIDEO_START_FILE_HUMAN in $RECODE_OVERALL video files:\n"
@@ -232,32 +262,14 @@ fi
 RECODE_BEGINNING=$(date +%s)
 while read -r -u 9 FILEPATH || [ -n "$FILEPATH" ];
 do
-    ((RECODE_CURRENT+=1))
+    (( RECODE_CURRENT+=1 ))
+    RECODE_VERDICT=${RECODE_FAILURE} # Assume recoding failure
     COUNTER_PREFIX=$(printf "%${RECODE_MAXIMUM}d/%d" "${RECODE_CURRENT}" "${RECODE_OVERALL}")
     recode VIDEO_PRUNE_FILE_BYTES "${VIDEO_PRUNE_FILE_BYTES}" "${VIDEO_SHRINKING_BUFFER}" "${COUNTER_PREFIX}" "${FILEPATH}"
-    status=$?
-    if [ $status -eq 0 ]; then
-        ((RECODE_SUCCESS+=1))         
+    if [ "${RECODE_VERDICT}" -eq "${RECODE_SUCCESS}" ]; then
+        (( RECODE_UPDATED+=1 ))
     fi
      
 done 9<<<"${VIDEO_SHRINKING_INPUTS}";
 RECODE_CONCLUDED=$(date +%s)
 RECODE_RUNPERIOD=$(timespanned "${RECODE_BEGINNING}" "${RECODE_CONCLUDED}")
-
-# 7th:
-# Report the final results.
-report 'info' "Successfully re-encoded ${RECODE_SUCCESS}/${RECODE_OVERALL} videos!"
-
-if [ $PROVIDED_VERBIAGE -ge 4 ]; then
-    VIDEO_PRUNE_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_PRUNE_FILE_BYTES}")
-    VIDEO_SMALL_FILE_BYTES=$((VIDEO_START_FILE_BYTES-VIDEO_PRUNE_FILE_BYTES))
-    VIDEO_SMALL_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_SMALL_FILE_BYTES}")
-    VIDEO_RATIO_FILE_BYTES=$(bc -l <<<"(100*${VIDEO_PRUNE_FILE_BYTES})/${VIDEO_START_FILE_BYTES}")
-    VIDEO_RATIO_FILE_HUMAN=$(printf %.2f%% "${VIDEO_RATIO_FILE_BYTES}")
-    report 'loud' "Processing elapsed for a total duration of ${RECODE_RUNPERIOD}"
-    report 'loud' "Re-encoding removed ${VIDEO_PRUNE_FILE_HUMAN}, reducing total file size by ${VIDEO_RATIO_FILE_HUMAN} ( ${VIDEO_SMALL_FILE_HUMAN} / ${VIDEO_START_FILE_HUMAN} )"
-fi
-
-# 8th:
-# Remove temporarily allocated resources
-cleanup VIDEO_SHRINKING_BUFFER
