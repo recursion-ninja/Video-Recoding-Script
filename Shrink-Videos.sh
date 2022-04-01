@@ -102,23 +102,24 @@ recode() {
     original_human=$(du -h "${video_filepath}" | cut -d$'\t' -f 1)
     initiation=$(date +%s)
 
-    local FFMPEG_DISPLAY_OPTIONS='-y -hide_banner -loglevel error -nostats'
-    local FFMPEG_ENCODER_OPTIONS='-c:v libx265 -x265-params log-level=error -max_muxing_queue_size 4096 -b:v 0'
-    local FFMPEG_SCALING_OPTIONS='-vf crop=trunc(iw/2)*2:trunc(ih/2)*2'
-
     output=$(ffmpeg \
-        ${FFMPEG_DISPLAY_OPTIONS} \
+        -y -hide_banner -loglevel error -nostats \
         -i "${video_filepath}" \
-        ${FFMPEG_ENCODER_OPTIONS} \
-        ${FFMPEG_SCALING_OPTIONS} \
+        -b:v 0 \
+        -c:v libx265 \
+        -x265-params log-level=error \
+        -crf 25 \
+        -max_muxing_queue_size 4096 \
+        -preset slow \
+        -vf 'crop=trunc(iw/2)*2:trunc(ih/2)*2' \
         "${buffer_address}" 2>&1);
     status=$?
     completion=$(date +%s)
 
     if [ $status -ne 0 ]; then
         RECODE_VERDICT=${RECODE_FAILURE}
-        report 'warn' "Error \t${video_filename}"
-        report 'loud' "${output}"
+        report 'warn' "Skip: \t${video_filename}"
+        report 'loud' "Error:\t${output}"
         return 0;
     fi
 
@@ -185,38 +186,67 @@ setup() {
 }
 
 summerize() {
-    # Check if we have started
-    if [[ -n "${RECODE_CURRENT}" ]] && [[ ${RECODE_CURRENT} -gt 0 ]]; then
-        report 'info' "\nSuccessfully re-encoded ${RECODE_UPDATED}/${RECODE_OVERALL} videos!"
-    
-        if [ $PROVIDED_VERBIAGE -ge 4 ]; then
-            VIDEO_PRUNE_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_PRUNE_FILE_BYTES}")
-            VIDEO_SMALL_FILE_BYTES=$(( VIDEO_START_FILE_BYTES-VIDEO_PRUNE_FILE_BYTES ))
-            VIDEO_SMALL_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_SMALL_FILE_BYTES}")
-            VIDEO_RATIO_FILE_BYTES=$(bc -l <<<"(100*${VIDEO_PRUNE_FILE_BYTES})/${VIDEO_START_FILE_BYTES}")
-            VIDEO_RATIO_FILE_HUMAN=$(printf %.2f%% "${VIDEO_RATIO_FILE_BYTES}")
-            report 'loud' "Processing elapsed for a total duration of ${RECODE_RUNPERIOD}"
-            report 'loud' "Re-encoding removed ${VIDEO_PRUNE_FILE_HUMAN}, reducing total file size by ${VIDEO_RATIO_FILE_HUMAN} ( ${VIDEO_SMALL_FILE_HUMAN} / ${VIDEO_START_FILE_HUMAN} )"
-        fi
+    if [ $PROVIDED_VERBIAGE -ge 4 ]; then
+        report 'loud' "Re-encoding $VIDEO_START_FILE_HUMAN in $RECODE_OVERALL video files:\n"
+    else
+        report 'info' "Re-encoding $RECODE_OVERALL video files totaling $VIDEO_START_FILE_HUMAN..."
     fi
+    RECODE_STARTED=${RECODE_SUCCESS}
+}
+
+
+recountal() {
+    # Check if we have started
+    if [[ -z "${RECODE_STOPPED}" ]]; then
+        # Add a newline to output *iff* a signal was sent to stop the process.
+        if [[ ! -z "${SIGNAL_FLAG}" ]]; then
+            report 'info' ""
+        fi
+
+        if [[ -n "${RECODE_STARTED}" ]] && [[ ${RECODE_STARTED} -eq ${RECODE_SUCCESS} ]]; then
+
+            # Add a newline to output *iff*
+            #   1. a newline was not added above because signal was sent to stop the process and
+            #   2. the verbosity is set to 'LOUD'
+            if [[ -z "${SIGNAL_FLAG}" ]]; then
+                report 'loud' ""
+            fi
+            report 'info' "Successfully re-encoded ${RECODE_UPDATED}/${RECODE_OVERALL} videos!"
+
+            if [ $PROVIDED_VERBIAGE -ge 4 ]; then
+                VIDEO_PRUNE_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_PRUNE_FILE_BYTES}")
+                VIDEO_SMALL_FILE_BYTES=$(( VIDEO_START_FILE_BYTES-VIDEO_PRUNE_FILE_BYTES ))
+                VIDEO_SMALL_FILE_HUMAN=$(numfmt --to=iec "${VIDEO_SMALL_FILE_BYTES}")
+                VIDEO_RATIO_FILE_BYTES=$(bc -l <<<"(100*${VIDEO_PRUNE_FILE_BYTES})/${VIDEO_START_FILE_BYTES}")
+                VIDEO_RATIO_FILE_HUMAN=$(printf %.2f%% "${VIDEO_RATIO_FILE_BYTES}")
+                report 'loud' "Processing elapsed for a total duration of ${RECODE_RUNPERIOD}"
+                report 'loud' "Re-encoding removed ${VIDEO_PRUNE_FILE_HUMAN}, reducing total file size by ${VIDEO_RATIO_FILE_HUMAN} ( ${VIDEO_SMALL_FILE_HUMAN} / ${VIDEO_START_FILE_HUMAN} )"
+            fi
+        else
+            report 'loud' "Stopped before enumeration of files was complete."
+        fi
+   fi
+   RECODE_STOPPED=0
 }
 
 
 # Remove temporary workspace.
 cleanup () {
     code=$?
-    report 'tech' "Entering function call: 'cleanup'"
+    if [[ $code -ne 0 ]]; then
+        SIGNAL_FLAG=0
+    fi
 
+    report 'tech' "Entering function call: 'cleanup'"
+    
     local buffer
     buffer=$(eval "echo \$$1")
     rm -rf "${buffer}"
     report 'tech' "Buffer file removed: ${buffer}"
+    
+    recountal
 
-    summerize
-
-    if [[ $code -ne 0 ]]; then
-        exit $code
-    fi
+    exit $code
 }
 
 
@@ -236,29 +266,36 @@ VIDEO_START_FILE_BYTES=$( (xargs -d$'\n' du -cb | tail -n 1 | cut -d$'\t' -f1) <
 VIDEO_PRUNE_FILE_BYTES=0
 
 # 4th:
-# Precompute pretty printing variables.
-RECODE_OVERALL=$(    wc -l <<<"${VIDEO_SHRINKING_INPUTS}")
-RECODE_MAXIMUM=$(( $(wc -c <<<"${RECODE_OVERALL}") - 1 ))
-RECODE_CURRENT=0
-RECODE_UPDATED=0
-
-# 5th:
 # Define re-encoding return result signals
 RECODE_SUCCESS=0
 RECODE_FAILURE=$(( ~(RECODE_SUCCESS) ))
 RECODE_VERDICT=${RECODE_FAILURE}
 
+# 5th:
+# Precompute pretty printing variables.
+RECODE_OVERALL=$(    wc -l <<<"${VIDEO_SHRINKING_INPUTS}")
+RECODE_MAXIMUM=$(( $(wc -c <<<"${RECODE_OVERALL}") - 1 ))
+RECODE_CURRENT=0
+RECODE_UPDATED=0
+RECODE_STARTED=${RECODE_FAILURE}
+
 # 6th:
+# Exit early if there were no files found
+if [[ ${RECODE_MAXIMUM} -eq 0 ]]; then
+    report 'info' "No re-encoding candidate video files found."
+    exit 0
+fi
+
+# 7th:
 # Setup a temporary workspace.
 setup VIDEO_SHRINKING_BUFFER
 
-# 7th:
+# 8th:
+# Summerize the total re-encoding candidate videos which were found.
+summerize
+
+# 9th:
 # Re-encode all applicable video files which were located.
-if [ $PROVIDED_VERBIAGE -ge 4 ]; then
-    report 'loud' "Re-encoding $VIDEO_START_FILE_HUMAN in $RECODE_OVERALL video files:\n"
-else
-    report 'info' "Re-encoding $RECODE_OVERALL video files totaling $VIDEO_START_FILE_HUMAN..."
-fi
 RECODE_BEGINNING=$(date +%s)
 while read -r -u 9 FILEPATH || [ -n "$FILEPATH" ];
 do
