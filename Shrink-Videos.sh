@@ -78,6 +78,7 @@ enumerate() {
     report 'tech' "Found files:\n$filepaths_final"
 
     VIDEO_SHRINKING_INPUTS="${filepaths_final}"
+    VIDEO_FILES_ENUMERATED='Done'
 }
 
 
@@ -222,6 +223,8 @@ recountal() {
                 report 'loud' "Processing elapsed for a total duration of ${RECODE_RUNPERIOD}"
                 report 'loud' "Re-encoding removed ${VIDEO_PRUNE_FILE_HUMAN}, reducing total file size by ${VIDEO_RATIO_FILE_HUMAN} ( ${VIDEO_SMALL_FILE_HUMAN} / ${VIDEO_START_FILE_HUMAN} )"
             fi
+        elif [[ -n "${VIDEO_FILES_ENUMERATED}" ]]; then
+            report 'info' "No re-encoding candidate video files found."
         else
             report 'loud' "Stopped before enumeration of files was complete."
         fi
@@ -259,11 +262,8 @@ parse "$@"
 enumerate
 
 # 3rd:
-# Note starting file size statistics for subsequent reporting.
-#VIDEO_START_FILE_HUMAN=$( (tr \\n \\0 | xargs -0 printf "%q" | tail -n +1 | du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
-VIDEO_START_FILE_HUMAN=$( (xargs -d$'\n' du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
-VIDEO_START_FILE_BYTES=$( (xargs -d$'\n' du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
-VIDEO_PRUNE_FILE_BYTES=0
+# Exit early if there were no files found.
+if [[ -z "${VIDEO_SHRINKING_INPUTS}" ]]; then exit 0; fi
 
 # 4th:
 # Define re-encoding return result signals
@@ -280,11 +280,10 @@ RECODE_UPDATED=0
 RECODE_STARTED=${RECODE_FAILURE}
 
 # 6th:
-# Exit early if there were no files found
-if [[ ${RECODE_MAXIMUM} -eq 0 ]]; then
-    report 'info' "No re-encoding candidate video files found."
-    exit 0
-fi
+# Note starting file size statistics for subsequent reporting.
+VIDEO_START_FILE_HUMAN=$( (xargs -d$'\n' du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_START_FILE_BYTES=$( (xargs -d$'\n' du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_PRUNE_FILE_BYTES=0
 
 # 7th:
 # Setup a temporary workspace.
