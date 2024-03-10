@@ -111,7 +111,7 @@ recode() {
         -x265-params log-level=error \
         -crf 25 \
         -max_muxing_queue_size 4096 \
-        -preset slow \
+        -preset slower \
         -vf 'crop=trunc(iw/2)*2:trunc(ih/2)*2' \
         "${buffer_address}" 2>&1);
     status=$?
@@ -124,36 +124,73 @@ recode() {
         return 0;
     fi
 
+    local shrunken_human shrunken_bytes squashed_bytes
+    shrunken_human=$(du -h "${buffer_address}" | cut -d$'\t' -f 1)
+    shrunken_bytes=$(du -b "${buffer_address}" | cut -d$'\t' -f 1)
+    squashed_bytes=$(( original_bytes-shrunken_bytes ))
+                     
     if [ $PROVIDED_VERBIAGE -ge 4 ]; then
-        local counter_string display_result nicely_rounded recoding_phase \
-              shrunken_bytes shrunken_human size_reduction squashed_bytes whitespace_pad
-        counter_string="${counter_prefix}"
-        whitespace_pad=$(printf "%*s" ${#counter_string} "")
-        recoding_phase=$(timespanned "${initiation}" "${completion}")
-        shrunken_bytes=$(du -b "${buffer_address}" | cut -d$'\t' -f 1)
-        shrunken_human=$(du -h "${buffer_address}" | cut -d$'\t' -f 1)
-        squashed_bytes=$(( original_bytes-shrunken_bytes ))
+        local 
         report 'tech' 'Statistics:\n'
         report 'tech' "\toriginal_bytes:\t${original_bytes}"
         report 'tech' "\toriginal_human:\t${original_human}"
         report 'tech' "\tshrunken_bytes:\t${shrunken_bytes}"
         report 'tech' "\tshrunken_human:\t${shrunken_human}"
         report 'tech' "\tsquashed_bytes:\t${squashed_bytes}"
-        size_reduction=$(bc -l <<<"(100*${squashed_bytes})/${original_bytes}")
-        nicely_rounded=$(printf %.2f%% "${size_reduction}")
-        display_result=$(printf "%s\t%s    %s / %s    %s\n" "${whitespace_pad}" "${recoding_phase}" "${shrunken_human}" "${original_human}" "${nicely_rounded}")
-        report 'loud' "${display_result}\n"
     fi
 
-    report 'tech' 'Moving buffer to:'
-    report 'tech' "${video_filepath%.*}.mkv"
-    report 'tech' "mv ${buffer_address} ${video_filepath%.*}.mkv"
+    # If the result is a smaller video file,
+    # then we take the re-encoded result!
+    if [ ${squashed_bytes} -ge 0 ]; then
+        if [ $PROVIDED_VERBIAGE -ge 4 ]; then
+            local counter_string display_result nicely_rounded recoding_phase size_reduction whitespace_pad
+            counter_string="${counter_prefix}"
+            whitespace_pad=$(printf "%*s" ${#counter_string} "")
+            recoding_phase=$(timespanned "${initiation}" "${completion}")
+            size_reduction=$(bc -l <<<"(100*${squashed_bytes})/${original_bytes}")
+            nicely_rounded=$(printf %.2f%% "${size_reduction}")
+            display_result=$(printf "%s\t%s    %s / %s    %s\n" "${whitespace_pad}" "${recoding_phase}" "${shrunken_human}" "${original_human}" "${nicely_rounded}")
+            report 'loud' "${display_result}\n"
+        fi
+    
+        report 'tech' 'Moving buffer to:'
+        report 'tech' "${video_filepath%.*}.mkv"
+        report 'tech' "mv ${buffer_address} ${video_filepath%.*}.mkv"
 
+        mv "${buffer_address}" "${video_filepath%.*}.mkv"
+    
+        (( byte_prune_sum+=squashed_bytes ))
+        eval "${result}"="\"${byte_prune_sum}\""
+
+    # Otherwise we copy the input into an MKV container.
+    else
+        if [ $PROVIDED_VERBIAGE -ge 4 ]; then
+            local counter_string display_result nicely_rounded recoding_phase size_reduction whitespace_pad
+            counter_string="${counter_prefix}"
+            whitespace_pad=$(printf "%*s" ${#counter_string} "")
+            recoding_phase=$(timespanned "${initiation}" "${completion}")
+            size_reduction=$(bc -l <<<"(100*${squashed_bytes})/${original_bytes}")
+            nicely_rounded=$(printf %.2f%% "${size_reduction}")
+            display_result=$(printf "%s\t%s    [Increased]    (Copying)\n" "${whitespace_pad}" "${recoding_phase}" "${shrunken_human}" "${original_human}" "${nicely_rounded}")
+            report 'loud' "${display_result}\n"
+        fi
+        report 'tech' 'Copying input stream into MKV to:'
+        report 'tech' "${video_filepath%.*}.mkv"
+        report 'tech' "ffmpeg -i ${video_filepath} ${video_filepath%.*}.mkv"
+
+        output=$(ffmpeg \
+            -y -hide_banner -loglevel error -nostats \
+            -i "${video_filepath}" \
+            -b:v 0 \
+            -c copy \
+            "${buffer_address}" 2>&1);
+        status=$?
+        mv "${buffer_address}" "${video_filepath%.*}.mkv"
+
+        eval "${result}"="\"${byte_prune_sum}\""
+    fi
     rm -f "${video_filepath}"
-    mv "${buffer_address}" "${video_filepath%.*}.mkv"
 
-    (( byte_prune_sum+=squashed_bytes ))
-    eval "${result}"="\"${byte_prune_sum}\""
     RECODE_VERDICT=${RECODE_SUCCESS}
 }
 
