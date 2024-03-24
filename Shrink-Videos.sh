@@ -157,6 +157,7 @@ recode() {
         report 'tech' "${video_filepath%.*}.mkv"
         report 'tech' "mv ${buffer_address} ${video_filepath%.*}.mkv"
 
+        rm -f "${video_filepath}"
         mv "${buffer_address}" "${video_filepath%.*}.mkv"
     
         (( byte_prune_sum+=squashed_bytes ))
@@ -185,11 +186,11 @@ recode() {
             -c copy \
             "${buffer_address}" 2>&1);
         status=$?
+        rm -f "${video_filepath}"
         mv "${buffer_address}" "${video_filepath%.*}.mkv"
 
         eval "${result}"="\"${byte_prune_sum}\""
     fi
-    rm -f "${video_filepath}"
 
     RECODE_VERDICT=${RECODE_SUCCESS}
 }
