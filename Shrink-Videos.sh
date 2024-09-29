@@ -92,16 +92,17 @@ recode() {
     local counter_prefix="${4}"
     local video_filepath="${5}"
 
-    local completion initiation original_bytes original_human video_filename video_nicename
+    local completion initiation original_bytes original_human video_filename video_nicename 
 
     video_filename=$(basename "${video_filepath}")
     video_nicename=${video_filename%.*}
 
-    report 'loud' "${counter_prefix}:\t$video_nicename"
-
-    original_bytes=$(du -b "${video_filepath}" | cut -d$'\t' -f 1)
-    original_human=$(du -h "${video_filepath}" | cut -d$'\t' -f 1)
+    original_human=$(du -h   "${video_filepath}" | cut -d$'\t' -f 1)
+    original_bytes=$(du -B 1 "${video_filepath}" | cut -d$'\t' -f 1)
     initiation=$(date +%s)
+    start_time=$(date '+%F %R')
+
+    report 'loud' "${counter_prefix} @ ${start_time}:\t${video_nicename}"
 
     output=$(ffmpeg \
         -y -hide_banner -loglevel error -nostats \
@@ -113,6 +114,7 @@ recode() {
         -max_muxing_queue_size 4096 \
         -preset slower \
         -vf 'crop=trunc(iw/2)*2:trunc(ih/2)*2' \
+        -f matroska \
         "${buffer_address}" 2>&1);
     status=$?
     completion=$(date +%s)
@@ -125,8 +127,8 @@ recode() {
     fi
 
     local shrunken_human shrunken_bytes squashed_bytes
-    shrunken_human=$(du -h "${buffer_address}" | cut -d$'\t' -f 1)
-    shrunken_bytes=$(du -b "${buffer_address}" | cut -d$'\t' -f 1)
+    shrunken_human=$(du -h   "${buffer_address}" | cut -d$'\t' -f 1)
+    shrunken_bytes=$(du -B 1 "${buffer_address}" | cut -d$'\t' -f 1)
     squashed_bytes=$(( original_bytes-shrunken_bytes ))
                      
     if [ $PROVIDED_VERBIAGE -ge 4 ]; then
@@ -319,8 +321,8 @@ RECODE_STARTED=${RECODE_FAILURE}
 
 # 6th:
 # Note starting file size statistics for subsequent reporting.
-VIDEO_START_FILE_HUMAN=$( (xargs -d$'\n' du -ch | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
-VIDEO_START_FILE_BYTES=$( (xargs -d$'\n' du -cb | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_START_FILE_HUMAN=$( (xargs -d$'\n' du -c -h   | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
+VIDEO_START_FILE_BYTES=$( (xargs -d$'\n' du -c -B 1 | tail -n 1 | cut -d$'\t' -f1) <<<"${VIDEO_SHRINKING_INPUTS}")
 VIDEO_PRUNE_FILE_BYTES=0
 
 # 7th:
