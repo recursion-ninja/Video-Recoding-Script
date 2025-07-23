@@ -6,6 +6,8 @@ trap "cleanup VIDEO_SHRINKING_BUFFER" ERR EXIT INT QUIT TERM
 PROVIDED_FILEPATH='.' # Default to current working directory
 PROVIDED_VERBIAGE=3   # Default to moderate verbosity: [0,5] -> [QUIET, ERROR, WARNS, INFOS, EXTRA, DEBUG]
 
+# The video file foprmat into which the re-encoded stream should be packaged.
+VIDEO_EXTENSION='${VIDEO_EXTENSION}'
 
 # General purpose function for standardized output.
 report() {
@@ -156,11 +158,11 @@ recode() {
         fi
     
         report 'tech' 'Moving buffer to:'
-        report 'tech' "${video_filepath%.*}.mkv"
-        report 'tech' "mv ${buffer_address} ${video_filepath%.*}.mkv"
+        report 'tech' "${video_filepath%.*}${VIDEO_EXTENSION}"
+        report 'tech' "mv ${buffer_address} ${video_filepath%.*}${VIDEO_EXTENSION}"
 
         rm -f "${video_filepath}"
-        mv "${buffer_address}" "${video_filepath%.*}.mkv"
+        mv "${buffer_address}" "${video_filepath%.*}${VIDEO_EXTENSION}"
     
         (( byte_prune_sum+=squashed_bytes ))
         eval "${result}"="\"${byte_prune_sum}\""
@@ -178,8 +180,8 @@ recode() {
             report 'loud' "${display_result}\n"
         fi
         report 'tech' 'Copying input stream into MKV to:'
-        report 'tech' "${video_filepath%.*}.mkv"
-        report 'tech' "ffmpeg -i ${video_filepath} ${video_filepath%.*}.mkv"
+        report 'tech' "${video_filepath%.*}${VIDEO_EXTENSION}"
+        report 'tech' "ffmpeg -i ${video_filepath} ${video_filepath%.*}${VIDEO_EXTENSION}"
 
         output=$(ffmpeg \
             -y -hide_banner -loglevel error -nostats \
@@ -189,7 +191,7 @@ recode() {
             "${buffer_address}" 2>&1);
         status=$?
         rm -f "${video_filepath}"
-        mv "${buffer_address}" "${video_filepath%.*}.mkv"
+        mv "${buffer_address}" "${video_filepath%.*}${VIDEO_EXTENSION}"
 
         eval "${result}"="\"${byte_prune_sum}\""
     fi
@@ -217,7 +219,7 @@ setup() {
 
     local result=$1
     local buffer struct
-    struct='Shrink-Videos-Buffer.XXXX.mkv'
+    struct='Shrink-Videos-Buffer.XXXX${VIDEO_EXTENSION}'
     buffer=$(mktemp -t ${struct})
     touch "${buffer}"
     
