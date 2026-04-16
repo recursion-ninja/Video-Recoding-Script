@@ -1,0 +1,41 @@
+cabal-version:   3.16
+name:            shrink-videos
+version:         1.0.0
+license:         CC0-1.0
+license-file:    doc/LICENSE
+author:          Recursion Ninja
+maintainer:      <github@recursion.ninja>
+synopsis:        Re-encode videos to x265 with size-aware replacement
+description:     Scans a directory for non-x265 video files and re-encodes them using ffmpeg.
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+executable Shrink-Videos
+    import:           warnings
+    main-is:          Main.hs
+    hs-source-dirs:   app, src
+    other-modules:
+        ShrinkVideos.App
+        ShrinkVideos.Cli
+        ShrinkVideos.Domain
+        ShrinkVideos.Type.EncodingOutcome
+        ShrinkVideos.Type.FileSize
+        ShrinkVideos.Type.VideoFile
+        ShrinkVideos.Type.VideoFormat
+    build-depends:
+        async >=2.2 && <2.3,
+        base ^>=4.21.0.0,
+        co-log >=0.6 && <0.8,
+        containers >=0.6 && <0.8,
+        directory >=1.3 && <1.5,
+        filepath >=1.4 && <1.6,
+        mtl >=2.3 && <2.4,
+        optparse-applicative >=0.18 && <0.19,
+        process >=1.6 && <1.7,
+        signal >=0.1 && <0.2,
+        text >=2.0 && <2.2,
+        time >=1.12 && <1.15
+    default-language: GHC2021
