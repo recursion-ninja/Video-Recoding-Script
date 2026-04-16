@@ -173,13 +173,16 @@ runProgram = do
                 modifyIORef' runtimeSummary $
                     setSummaryFilesFound (toWordCount (length candidates))
 
-            let renderFoundMetrics suffix xs =
-                  let count = tshow . toWordCount $ length xs
-                      space = T.pack . renderFileSizeSI . sum $ videoFileSize <$> xs
-                  in  logInfo $ T.unwords [ "  -", count, "totaling", space, suffix]
+            let countRender = show . toWordCount . length
+                spaceRender = renderFileSizeSI . sum . fmap videoFileSize
+                (countEncoded, countCandidates) = makeSameWidth (countRender x265Files) . countRender $ candidateVideoFile <$> candidates
+                (spaceEncoded, spaceCandidates) = makeSameWidth (spaceRender x265Files) . spaceRender $ candidateVideoFile <$> candidates
+
+            let renderFoundMetrics count space suffix =
+                 logInfo $ T.unwords [ "  -", count, "totaling", space, suffix]
             logInfo $ "Recognized " <> tshow (toWordCount (length videoFiles)) <> " video files:"
-            renderFoundMetrics "identified as x265/hevc encoded" x265Files
-            renderFoundMetrics "designated to be re-encoded" $ candidateVideoFile <$> candidates
+            renderFoundMetrics countEncoded    spaceEncoded    "identified as x265/hevc encoded"
+            renderFoundMetrics countCandidates spaceCandidates "designated to be re-encoded"
             case candidates of
                 [] -> logInfo "No re-encoding candidate video files found!"
                 x:xs -> do
@@ -321,9 +324,10 @@ processCandidate currentIndex totalCount candidate =
         startedText <- liftIO (renderLocalTimestamp localZone =<< getCurrentTime)
         fileLabel <- pathToText (Path.takeFileName (candidateVideoPath candidate))
         let renderCounterFixedWidth i t =
-              let counterStr = unwords [ "[", show i, "/", show t, "]" ]
-                  len = length counterStr
-              in  T.pack $ counterStr <> replicate (15 - len) ' '
+              let (iText, tText) = makeSameWidth (show i) (show t)
+                  counterStr = T.unwords [ "[", iText, "/", tText, "]" ]
+                  len = T.length counterStr
+              in  counterStr <> T.replicate (15 - len) " "
 
         logInfo $ mconcat
             [ startedText
@@ -764,3 +768,9 @@ cleanupProcess stdoutHandle stderrHandle processHandle = do
     _ <- try (hClose stdoutHandle) :: IO (Either IOException ())
     _ <- try (hClose stderrHandle) :: IO (Either IOException ())
     pure ()
+
+makeSameWidth :: String -> String -> (Text, Text)
+makeSameWidth x y =
+    let n = max (length x) (length y)
+        lpad v = T.pack $ replicate (n - length v) ' ' <> v
+    in  (lpad x, lpad y)
