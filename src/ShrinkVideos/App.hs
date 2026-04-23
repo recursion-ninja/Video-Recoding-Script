@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -10,15 +11,16 @@ module ShrinkVideos.App
     , cleanupAndReport
     ) where
 
-import Control.Concurrent.Async (Async, async, cancel, wait)
-import Control.Exception (IOException, bracket, evaluate, finally, throwIO, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Concurrent.Async (Async, cancel, wait, withAsync)
+import Control.Exception (IOException, bracket, finally, throwIO, try)
+import Control.Monad (forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List.NonEmpty (NonEmpty(..), sortOn)
+import Data.Function (on)
+import Data.List (sortBy)
+import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
-import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Numeric (showFFloat)
@@ -33,7 +35,7 @@ import System.Directory.OsPath
     , renamePath
     )
 import System.Exit (ExitCode (..))
-import System.IO (Handle, hClose, hGetContents, openTempFile)
+import System.IO (Handle, hClose, hIsEOF, openTempFile)
 import System.Process
     ( CreateProcess (std_err, std_out)
     , ProcessHandle
@@ -90,6 +92,7 @@ data RuntimeEnv = RuntimeEnv
     , runtimeTempDirectory :: !Path.OsPath
     , runtimeCurrentTempFile :: !(IORef (Maybe Path.OsPath))
     , runtimeCurrentFfmpegWorker :: !(IORef (Maybe (Async CommandResult)))
+    , runtimeSkippedFilesRev :: !(IORef [Path.OsPath])
     , runtimeSummary :: !(IORef Summary)
     }
 
@@ -123,12 +126,25 @@ data ProbeResult
     | NoVideoStreams
     | VideoCodecs !(NonEmpty Text)
 
+data Candidacy
+    = AlreadyEncoded !VideoFile
+    | NeedsReencode !CandidateVideo
+
+data CandidateInventory = CandidateInventory
+    { inventoryEncodedCount :: !Word
+    , inventoryEncodedBytes :: !FileSize
+    , inventoryCandidateCount :: !Word
+    , inventoryCandidateBytes :: !FileSize
+    , inventoryCandidatesRev :: ![CandidateVideo]
+    }
+
 buildRuntimeEnv :: Options -> IO RuntimeEnv
 buildRuntimeEnv runtimeOptions = do
     runtimeStartedAt <- getCurrentTime
     runtimeTempDirectory <- getTemporaryDirectory
     runtimeCurrentTempFile <- newIORef Nothing
     runtimeCurrentFfmpegWorker <- newIORef Nothing
+    runtimeSkippedFilesRev <- newIORef []
     runtimeSummary <- newIORef emptySummary
     let runtimeLogger =
             Logger
@@ -152,7 +168,9 @@ cleanupAndReport env = do
     cancelCurrentFfmpeg env
     runReaderT (unAppM removeCurrentTempFile) env
     runtimeStoppedAt <- getCurrentTime
+    skippedFilesRev <- readIORef (runtimeSkippedFilesRev env)
     summary <- readIORef (runtimeSummary env)
+    reportSkippedFiles (optionsRootPath (runtimeOptions env)) (reverse skippedFilesRev)
     reportSummary (runtimeStartedAt env) runtimeStoppedAt summary
 
 runProgram :: AppM ()
@@ -167,34 +185,56 @@ runProgram = do
             rootPathText <- pathToText optionsRootPath
             logWarning ("Directory does not exist or is not a directory: " <> rootPathText)
         else do
-            videoFiles <- collectVideoFiles optionsRootPath optionsRecursive
-            (x265Files, candidates) <- partitionCandidates videoFiles
+            candidateInventory <- collectCandidateInventory optionsRootPath optionsRecursive
             liftIO $
                 modifyIORef' runtimeSummary $
-                    setSummaryFilesFound (toWordCount (length candidates))
+                    setSummaryFilesFound (inventoryCandidateCount candidateInventory)
 
-            let countRender = show . toWordCount . length
-                spaceRender = renderFileSizeSI . sum . fmap videoFileSize
-                (countEncoded, countCandidates) = makeSameWidth (countRender x265Files) . countRender $ candidateVideoFile <$> candidates
-                (spaceEncoded, spaceCandidates) = makeSameWidth (spaceRender x265Files) . spaceRender $ candidateVideoFile <$> candidates
-
-            let renderFoundMetrics count space suffix =
-                 logInfo $ T.unwords [ "  -", count, "totaling", space, suffix]
-            logInfo $ "Recognized " <> tshow (toWordCount (length videoFiles)) <> " video files:"
+            let recognizedCount = inventoryEncodedCount candidateInventory + inventoryCandidateCount candidateInventory
+                (countEncoded, countCandidates) =
+                    makeSameWidth
+                        (show (inventoryEncodedCount candidateInventory))
+                        (show (inventoryCandidateCount candidateInventory))
+                (spaceEncoded, spaceCandidates) =
+                    makeSameWidth
+                        (renderFileSizeSI (inventoryEncodedBytes candidateInventory))
+                        (renderFileSizeSI (inventoryCandidateBytes candidateInventory))
+                renderFoundMetrics count space suffix =
+                    logInfo (T.unwords ["  -", count, "totaling", space, suffix])
+            logInfo $ "Recognized " <> tshow recognizedCount <> " video files:"
             renderFoundMetrics countEncoded    spaceEncoded    "identified as x265/hevc encoded"
             renderFoundMetrics countCandidates spaceCandidates "designated to be re-encoded"
-            case candidates of
-                [] -> logInfo "No re-encoding candidate video files found!"
-                x:xs -> do
-                    let sortedCandidates = sortOn (Down . candidateVideoSize) $ x:|xs
-                        candidateCount   = toWordCount $ length sortedCandidates
-                    forM_ (NE.zip ((1 :: Word) :| [ 2 ..]) sortedCandidates) $ \(currentIndex, candidate) ->
-                        processCandidate currentIndex candidateCount candidate
+            if inventoryCandidateCount candidateInventory == 0
+                then logInfo "No re-encoding candidate video files found!"
+                else do
+                    let sortedCandidates =
+                            sortBy (flip compare `on` candidateVideoSize) (inventoryCandidatesRev candidateInventory)
+                    processCandidates sortedCandidates (inventoryCandidateCount candidateInventory)
 
-collectVideoFiles :: Path.OsPath -> Bool -> AppM [VideoFile]
-collectVideoFiles rootPath shouldRecurse = walk rootPath
+collectCandidateInventory :: Path.OsPath -> Bool -> AppM CandidateInventory
+collectCandidateInventory rootPath shouldRecurse =
+    foldVideoFiles rootPath shouldRecurse emptyCandidateInventory step
   where
-    walk currentPath = do
+    step !inventory videoFile = do
+        candidateResult <- collectCandidate videoFile
+        pure $
+            case candidateResult of
+                Nothing -> inventory
+                Just candidacy -> addInventoryCandidacy inventory candidacy
+
+processCandidates :: [CandidateVideo] -> Word -> AppM ()
+processCandidates candidates totalCandidates =
+    go 1 candidates
+  where
+    go !_ [] = pure ()
+    go !currentIndex (candidate:remainingCandidates) = do
+        processCandidate currentIndex totalCandidates candidate
+        go (currentIndex + 1) remainingCandidates
+
+foldVideoFiles :: Path.OsPath -> Bool -> a -> (a -> VideoFile -> AppM a) -> AppM a
+foldVideoFiles rootPath shouldRecurse initialAcc step = walk initialAcc rootPath
+  where
+    walk !acc currentPath = do
         entriesResult <- liftIO (try (listDirectory currentPath) :: IO (Either IOException [Path.OsPath]))
         case entriesResult of
             Left ioEx -> do
@@ -204,27 +244,34 @@ collectVideoFiles rootPath shouldRecurse = walk rootPath
                         <> currentPathText
                         <> "': "
                         <> T.pack (show ioEx)
-                pure []
-            Right entries -> fmap concat . forM entries $ \entry -> do
-                let childPath = currentPath Path.</> entry
-                isDirectory <- safeDoesDirectoryExist childPath
-                if isDirectory
-                    then
-                        if shouldRecurse
-                            then walk childPath
-                            else pure []
-                    else do
-                        isFile <- safeDoesFileExist childPath
-                        if isFile
-                            then
-                                case isVideoFile childPath of
-                                    Nothing -> pure []
-                                    Just videoFormat -> do
-                                        videoFile <- collectVideoFile rootPath childPath videoFormat
-                                        case videoFile of
-                                            Nothing -> pure []
-                                            Just resolvedVideoFile -> pure [resolvedVideoFile]
-                            else pure []
+                pure acc
+            Right entries -> walkEntries acc currentPath entries
+
+    walkEntries !acc _ [] = pure acc
+    walkEntries !acc currentPath (entry:entries) = do
+        let childPath = currentPath Path.</> entry
+        isDirectory <- safeDoesDirectoryExist childPath
+        !nextAcc <-
+            if isDirectory
+                then
+                    if shouldRecurse
+                        then walk acc childPath
+                        else pure acc
+                else do
+                    isFile <- safeDoesFileExist childPath
+                    if isFile
+                        then
+                            case isVideoFile childPath of
+                                Nothing -> pure acc
+                                Just videoFormat -> do
+                                    videoFile <- collectVideoFile rootPath childPath videoFormat
+                                    case videoFile of
+                                        Nothing -> pure acc
+                                        Just resolvedVideoFile -> do
+                                            acc' <- step acc resolvedVideoFile
+                                            pure $! acc'
+                        else pure acc
+        walkEntries nextAcc currentPath entries
 
 collectVideoFile :: Path.OsPath -> Path.OsPath -> VideoFormat -> AppM (Maybe VideoFile)
 collectVideoFile rootPath inputPath videoFormat = do
@@ -255,21 +302,32 @@ collectVideoFile rootPath inputPath videoFormat = do
                                 , videoFileSize = resolvedFileSize
                                 }
 
-partitionCandidates :: [VideoFile] -> AppM ([VideoFile], [CandidateVideo])
-partitionCandidates inputFiles = foldr determineCandidacy  (pure ([], [])) inputFiles
+emptyCandidateInventory :: CandidateInventory
+emptyCandidateInventory =
+    CandidateInventory
+        { inventoryEncodedCount = 0
+        , inventoryEncodedBytes = 0
+        , inventoryCandidateCount = 0
+        , inventoryCandidateBytes = 0
+        , inventoryCandidatesRev = []
+        }
 
-determineCandidacy :: VideoFile -> AppM ([VideoFile], [CandidateVideo]) -> AppM ([VideoFile], [CandidateVideo])
-determineCandidacy inputFile currResult = do
-    (x265Files, candidateFiles) <- currResult
-    candidateResult <- collectCandidate inputFile
-    pure $
-        case candidateResult of
-            Nothing -> (x265Files, candidateFiles)
-            Just e -> case e of
-              Left encoded -> (encoded : x265Files, candidateFiles)
-              Right candidate -> (x265Files, candidate : candidateFiles)
+addInventoryCandidacy :: CandidateInventory -> Candidacy -> CandidateInventory
+addInventoryCandidacy inventory candidacy =
+    case candidacy of
+        AlreadyEncoded videoFile ->
+            inventory
+                { inventoryEncodedCount = inventoryEncodedCount inventory + 1
+                , inventoryEncodedBytes = inventoryEncodedBytes inventory + videoFileSize videoFile
+                }
+        NeedsReencode candidate ->
+            inventory
+                { inventoryCandidateCount = inventoryCandidateCount inventory + 1
+                , inventoryCandidateBytes = inventoryCandidateBytes inventory + candidateVideoSize candidate
+                , inventoryCandidatesRev = candidate : inventoryCandidatesRev inventory
+                }
 
-collectCandidate :: VideoFile -> AppM (Maybe (Either VideoFile  CandidateVideo))
+collectCandidate :: VideoFile -> AppM (Maybe Candidacy)
 collectCandidate inputFile@VideoFile{..} = do
     rootPath <- asks (optionsRootPath . runtimeOptions)
     probeResult <- probeVideoCodecs videoFilePath
@@ -286,9 +344,9 @@ collectCandidate inputFile@VideoFile{..} = do
                 logExtra $
                     "Skipping already x265/hevc file: "
                         <> inputPathText
-                pure . Just $ Left inputFile
+                pure . Just $ AlreadyEncoded inputFile
             | otherwise ->
-                pure . Just . Right $ CandidateVideo inputFile
+                pure . Just . NeedsReencode $ CandidateVideo inputFile
 
 probeVideoCodecs :: Path.OsPath -> AppM ProbeResult
 probeVideoCodecs inputPath = do
@@ -320,93 +378,104 @@ processCandidate :: Word -> Word -> CandidateVideo -> AppM ()
 processCandidate currentIndex totalCount candidate =
     withTemporaryFile $ \tempPath -> do
         Options{..} <- asks runtimeOptions
-        localZone <- liftIO getCurrentTimeZone
-        startedText <- liftIO (renderLocalTimestamp localZone =<< getCurrentTime)
-        fileLabel <- pathToText (Path.takeFileName (candidateVideoPath candidate))
-        let renderCounterFixedWidth i t =
-              let (iText, tText) = makeSameWidth (show i) (show t)
-                  counterStr = T.unwords [ "[", iText, "/", tText, "]" ]
-                  len = T.length counterStr
-              in  counterStr <> T.replicate (15 - len) " "
+        exists <- safeDoesFileExist (candidateVideoPath candidate)
+        case exists of
+            False -> do
+                skippedFilesRef <- asks runtimeSkippedFilesRev
+                liftIO $
+                    atomicModifyIORef' skippedFilesRef $ \skippedFiles ->
+                        let !updatedSkippedFiles = candidateVideoPath candidate : skippedFiles
+                        in  (updatedSkippedFiles, ())
+                fileLabel <- displayPathFromRoot optionsRootPath (candidateVideoPath candidate)
+                logWarning ("Skipping missing file: " <> fileLabel)
+            True -> do
+                localZone <- liftIO getCurrentTimeZone
+                startedText <- liftIO (renderLocalTimestamp localZone =<< getCurrentTime)
+                fileLabel <- pathToText (Path.takeFileName (candidateVideoPath candidate))
+                let renderCounterFixedWidth i t =
+                      let (iText, tText) = makeSameWidth (show i) (show t)
+                          counterStr = T.unwords [ "[", iText, "/", tText, "]" ]
+                          len = T.length counterStr
+                      in  counterStr <> T.replicate (15 - len) " "
 
-        logInfo $ mconcat
-            [ startedText
-            , " @ "
-            , renderCounterFixedWidth currentIndex totalCount
-            , "\t"
-            , fileLabel
-            ]
+                logInfo $ mconcat
+                    [ startedText
+                    , " @ "
+                    , renderCounterFixedWidth currentIndex totalCount
+                    , "\t"
+                    , fileLabel
+                    ]
 
-        encodeResult <-
-            ffmpegEncodeX265
-                optionsOutputFormat
-                (candidateVideoSize candidate)
-                (candidateVideoPath candidate)
-                tempPath
-        case encodeResult of
-            Left ffmpegError ->
-                logWarning $
-                    "["
-                        <> tshow currentIndex
-                        <> "/"
-                        <> tshow totalCount
-                        <> "] Failed x265 encode for "
-                        <> fileLabel
-                        <> ": "
-                        <> ffmpegError
-            Right outcome ->
-                case decideRecodeDecision
-                    (encodingOutcomeOriginalFileSize outcome)
-                    (encodingOutcomeFinishedFileSize outcome) of
-                    KeepEncodedOutput -> do
-                        finalSize <- replaceOriginalWithTemp candidate tempPath
-                        stoppedText <- liftIO (renderLocalTimestamp localZone (encodingOutcomeStoppedAt outcome))
-                        let savedPercent =
-                                if candidateVideoSize candidate == 0
-                                    then 0
-                                    else ((fromIntegral (candidateVideoSize candidate) - fromIntegral finalSize) / fromIntegral (candidateVideoSize candidate) :: Double) * 100
-                            elapsedSeconds =
-                                max 0 (ceiling (diffUTCTime (encodingOutcomeStoppedAt outcome) (encodingOutcomeStartedAt outcome)) :: Integer)
-                        logInfo $
-                            T.concat
-                                [ stoppedText
-                                , " ~ "
-                                , renderDetailedElapsed elapsedSeconds
-                                , "\t"
-                                , T.pack (renderPercentage3 savedPercent)
-                                , " "
-                                , T.pack (renderFileSizeSI finalSize)
-                                , " / "
-                                , T.pack (renderFileSizeSI (candidateVideoSize candidate))
-                                ]
-                    ReencodeCopyForExtension -> do
-                        copyResult <-
-                            ffmpegCopyForExtension
-                                optionsOutputFormat
-                                (candidateVideoSize candidate)
-                                (candidateVideoPath candidate)
-                                tempPath
-                        case copyResult of
-                            Left copyError ->
-                                logWarning $
-                                    "["
-                                        <> tshow currentIndex
-                                        <> "/"
-                                        <> tshow totalCount
-                                        <> "] Copy-for-extension failed for "
-                                        <> fileLabel
-                                        <> ": "
-                                        <> copyError
-                            Right copyOutcome -> do
+                encodeResult <-
+                    ffmpegEncodeX265
+                        optionsOutputFormat
+                        (candidateVideoSize candidate)
+                        (candidateVideoPath candidate)
+                        tempPath
+                case encodeResult of
+                    Left ffmpegError ->
+                        logWarning $
+                            "["
+                                <> tshow currentIndex
+                                <> "/"
+                                <> tshow totalCount
+                                <> "] Failed x265 encode for "
+                                <> fileLabel
+                                <> ": "
+                                <> ffmpegError
+                    Right outcome ->
+                        case decideRecodeDecision
+                            (encodingOutcomeOriginalFileSize outcome)
+                            (encodingOutcomeFinishedFileSize outcome) of
+                            KeepEncodedOutput -> do
                                 finalSize <- replaceOriginalWithTemp candidate tempPath
+                                stoppedText <- liftIO (renderLocalTimestamp localZone (encodingOutcomeStoppedAt outcome))
+                                let savedPercent =
+                                        if candidateVideoSize candidate == 0
+                                            then 0
+                                            else ((fromIntegral (candidateVideoSize candidate) - fromIntegral finalSize) / fromIntegral (candidateVideoSize candidate) :: Double) * 100
+                                    elapsedSeconds =
+                                        max 0 (ceiling (diffUTCTime (encodingOutcomeStoppedAt outcome) (encodingOutcomeStartedAt outcome)) :: Integer)
                                 logInfo $
-                                    "Used copy-for-extension for "
-                                        <> fileLabel
-                                        <> " ("
-                                        <> tshow (encodingOutcomeOriginalFileSize copyOutcome)
-                                        <> " -> "
-                                        <> tshow finalSize
-                                        <> " bytes)."
+                                    T.concat
+                                        [ stoppedText
+                                        , " ~ "
+                                        , renderDetailedElapsed elapsedSeconds
+                                        , "\t"
+                                        , T.pack (renderPercentage3 savedPercent)
+                                        , " "
+                                        , T.pack (renderFileSizeSI finalSize)
+                                        , " / "
+                                        , T.pack (renderFileSizeSI (candidateVideoSize candidate))
+                                        ]
+                            ReencodeCopyForExtension -> do
+                                copyResult <-
+                                    ffmpegCopyForExtension
+                                        optionsOutputFormat
+                                        (candidateVideoSize candidate)
+                                        (candidateVideoPath candidate)
+                                        tempPath
+                                case copyResult of
+                                    Left copyError ->
+                                        logWarning $
+                                            "["
+                                                <> tshow currentIndex
+                                                <> "/"
+                                                <> tshow totalCount
+                                                <> "] Copy-for-extension failed for "
+                                                <> fileLabel
+                                                <> ": "
+                                                <> copyError
+                                    Right copyOutcome -> do
+                                        finalSize <- replaceOriginalWithTemp candidate tempPath
+                                        logInfo $
+                                            "Used copy-for-extension for "
+                                                <> fileLabel
+                                                <> " ("
+                                                <> tshow (encodingOutcomeOriginalFileSize copyOutcome)
+                                                <> " -> "
+                                                <> tshow finalSize
+                                                <> " bytes)."
 
 ffmpegEncodeX265 :: VideoFormat -> FileSize -> Path.OsPath -> Path.OsPath -> AppM (Either Text EncodingOutcome)
 ffmpegEncodeX265 outputFormat originalFileSize inputPath tempPath = do
@@ -535,14 +604,15 @@ ffmpegStandardizedFlags outputFormat inputPath tempPath flags = do
 runCommandCapture :: String -> [String] -> AppM CommandResult
 runCommandCapture executable args = do
     let action = runProcessCapture executable args
-    if  executable == "ffmpeg"
-    then do
+    if executable == "ffmpeg"
+        then do
             workerRef <- asks runtimeCurrentFfmpegWorker
-            worker <- liftIO $ async action
-            liftIO (writeIORef workerRef (Just worker))
             liftIO
-                (wait worker `finally` writeIORef workerRef Nothing)
-    else liftIO $ action
+                (withAsync action $ \worker -> do
+                    writeIORef workerRef (Just worker)
+                    wait worker `finally` writeIORef workerRef Nothing
+                )
+        else liftIO action
 
 withTemporaryFile :: (Path.OsPath -> AppM a) -> AppM a
 withTemporaryFile action = do
@@ -574,6 +644,16 @@ removeCurrentTempFile = do
         Nothing -> pure ()
         Just tempPath -> liftIO (removeFileIfExists tempPath)
 
+reportSkippedFiles :: Path.OsPath -> [Path.OsPath] -> IO ()
+reportSkippedFiles rootPath skippedFiles =
+    case skippedFiles of
+        [] -> pure ()
+        _ -> do
+            TIO.putStrLn "Skipped files:"
+            forM_ skippedFiles $ \skippedFile -> do
+                relativeText <- renderRelativePath rootPath skippedFile
+                TIO.putStrLn ("  - " <> relativeText)
+
 reportSummary :: UTCTime -> UTCTime -> Summary -> IO ()
 reportSummary startedAt stoppedAt Summary{..} = do
     localZone <- getCurrentTimeZone
@@ -589,7 +669,7 @@ reportSummary startedAt stoppedAt Summary{..} = do
                 then 0
                 else 100 * (fromIntegral summaryFinalBytes / fromIntegral summaryOriginalBytes :: Double)
     TIO.putStrLn $
-        "Files re-encoded: "
+        "\nFiles re-encoded: "
             <> tshow summaryFilesReencoded
             <> " / "
             <> tshow summaryFilesFound
@@ -646,9 +726,6 @@ tshow = T.pack . show
 pathToText :: Path.OsPath -> AppM Text
 pathToText path = T.pack <$> liftIO (Path.decodeUtf path)
 
-toWordCount :: Int -> Word
-toWordCount = fromIntegral
-
 tempFileSize :: Path.OsPath -> AppM (Maybe FileSize)
 tempFileSize filePath = do
     sizeResult <- liftIO (try (getFileSize filePath) :: IO (Either IOException Integer))
@@ -664,6 +741,14 @@ displayPathFromRoot :: Path.OsPath -> Path.OsPath -> AppM Text
 displayPathFromRoot rootPath fullPath = do
     let relativePath = Path.makeRelative rootPath fullPath
     relativeText <- pathToText relativePath
+    pure $
+        if T.null relativeText
+            then "."
+            else relativeText
+
+renderRelativePath :: Path.OsPath -> Path.OsPath -> IO Text
+renderRelativePath rootPath fullPath = do
+    relativeText <- T.pack <$> Path.decodeUtf (Path.makeRelative rootPath fullPath)
     pure $
         if T.null relativeText
             then "."
@@ -736,30 +821,41 @@ runProcessCapture executableText argsText = do
         _ -> throwIO (userError "Failed to create ffmpeg output pipes.")
 
 waitForCommandResult :: Handle -> Handle -> ProcessHandle -> IO CommandResult
-waitForCommandResult stdoutHandle stderrHandle processHandle = do
-    stdoutWorker <- async (T.pack <$> readHandleContents stdoutHandle)
-    stderrWorker <- async (T.pack <$> readHandleContents stderrHandle)
-    exitCode <- waitForProcess processHandle
-    stdoutText <- wait stdoutWorker
-    stderrText <- wait stderrWorker
-    pure
-        CommandResult
-            { commandExitCode = exitCode
-            , commandStdout = stdoutText
-            , commandStderr = stderrText
-            }
+waitForCommandResult stdoutHandle stderrHandle processHandle =
+    withAsync (readHandleContents stdoutHandle) $ \stdoutWorker ->
+        withAsync (readHandleContents stderrHandle) $ \stderrWorker -> do
+            exitCode <- waitForProcess processHandle
+            stdoutText <- wait stdoutWorker
+            stderrText <- wait stderrWorker
+            pure
+                CommandResult
+                    { commandExitCode = exitCode
+                    , commandStdout = stdoutText
+                    , commandStderr = stderrText
+                    }
 
-readHandleContents :: Handle -> IO String
-readHandleContents handle =
-    bracket
-        (pure handle)
-        hClose
-        readContents
+readHandleContents :: Handle -> IO Text
+readHandleContents handle = go maxCapturedChars False []
   where
-        readContents stream = do
-            contents <- hGetContents stream
-            _ <- evaluate (length contents)
-            pure contents
+    go !remaining !wasTruncated !chunks = do
+        endOfFile <- hIsEOF handle
+        if endOfFile
+            then
+                pure $
+                    let contents = T.concat (reverse chunks)
+                    in  if wasTruncated
+                        then contents <> "\n[output truncated]"
+                        else contents
+            else do
+                chunk <- TIO.hGetChunk handle
+                let !keptChunk = T.take remaining chunk
+                    !usedChars = T.length keptChunk
+                    !remaining' = max 0 (remaining - usedChars)
+                    !wasTruncated' = wasTruncated || T.length keptChunk < T.length chunk
+                    !chunks'
+                        | T.null keptChunk = chunks
+                        | otherwise = keptChunk : chunks
+                go remaining' wasTruncated' chunks'
 
 cleanupProcess :: Handle -> Handle -> ProcessHandle -> IO ()
 cleanupProcess stdoutHandle stderrHandle processHandle = do
@@ -768,6 +864,9 @@ cleanupProcess stdoutHandle stderrHandle processHandle = do
     _ <- try (hClose stdoutHandle) :: IO (Either IOException ())
     _ <- try (hClose stderrHandle) :: IO (Either IOException ())
     pure ()
+
+maxCapturedChars :: Int
+maxCapturedChars = 65536
 
 makeSameWidth :: String -> String -> (Text, Text)
 makeSameWidth x y =
