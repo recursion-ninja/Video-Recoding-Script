@@ -47,8 +47,6 @@ import System.Process
     )
 import Data.Time.LocalTime (TimeZone, getCurrentTimeZone, utcToLocalTime)
 
-import Colog (LogAction, logTextStdout, unLogAction)
-
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.OsPath qualified as Path
@@ -59,14 +57,13 @@ import ShrinkVideos.Domain
     , RecodeDecision (..)
     , RecodeResult (..)
     , Summary (..)
-    , Verbosity
     , addRecodeResult
     , decideRecodeDecision
     , emptySummary
     , isX265Codec
     , setSummaryFilesFound
-    , shouldLog
     )
+import ShrinkVideos.Logging qualified as Logging
 import ShrinkVideos.Type.FileSize
     ( FileSize
     , fileSizeFromIntegerMaybe
@@ -87,18 +84,13 @@ import ShrinkVideos.Type.VideoFormat
 
 data RuntimeEnv = RuntimeEnv
     { runtimeOptions :: !Options
-    , runtimeLogger :: !Logger
+    , runtimeLogger :: !Logging.Logger
     , runtimeStartedAt :: !UTCTime
     , runtimeTempDirectory :: !Path.OsPath
     , runtimeCurrentTempFile :: !(IORef (Maybe Path.OsPath))
     , runtimeCurrentFfmpegWorker :: !(IORef (Maybe (Async CommandResult)))
     , runtimeSkippedFilesRev :: !(IORef [Path.OsPath])
     , runtimeSummary :: !(IORef Summary)
-    }
-
-data Logger = Logger
-    { loggerVerbosity :: !Verbosity
-    , loggerSink :: !(LogAction IO Text)
     }
 
 newtype AppM a = AppM { unAppM :: ReaderT RuntimeEnv IO a }
@@ -146,11 +138,7 @@ buildRuntimeEnv runtimeOptions = do
     runtimeCurrentFfmpegWorker <- newIORef Nothing
     runtimeSkippedFilesRev <- newIORef []
     runtimeSummary <- newIORef emptySummary
-    let runtimeLogger =
-            Logger
-                { loggerVerbosity = optionsVerbosity runtimeOptions
-                , loggerSink = logTextStdout
-                }
+    runtimeLogger <- Logging.buildLogger (optionsVerbosity runtimeOptions)
     pure RuntimeEnv{..}
 
 runShrinkVideos :: RuntimeEnv -> IO ()
@@ -392,16 +380,10 @@ processCandidate currentIndex totalCount candidate =
                 localZone <- liftIO getCurrentTimeZone
                 startedText <- liftIO (renderLocalTimestamp localZone =<< getCurrentTime)
                 fileLabel <- pathToText (Path.takeFileName (candidateVideoPath candidate))
-                let renderCounterFixedWidth i t =
-                      let (iText, tText) = makeSameWidth (show i) (show t)
-                          counterStr = T.unwords [ "[", iText, "/", tText, "]" ]
-                          len = T.length counterStr
-                      in  counterStr <> T.replicate (15 - len) " "
-
                 logInfo $ mconcat
                     [ startedText
                     , " @ "
-                    , renderCounterFixedWidth currentIndex totalCount
+                    , Logging.renderPaddedIndexCounter currentIndex totalCount
                     , "\t"
                     , fileLabel
                     ]
@@ -415,11 +397,8 @@ processCandidate currentIndex totalCount candidate =
                 case encodeResult of
                     Left ffmpegError ->
                         logWarning $
-                            "["
-                                <> tshow currentIndex
-                                <> "/"
-                                <> tshow totalCount
-                                <> "] Failed x265 encode for "
+                            Logging.renderIndexCounter currentIndex totalCount
+                                <> " Failed x265 encode for "
                                 <> fileLabel
                                 <> ": "
                                 <> ffmpegError
@@ -442,7 +421,7 @@ processCandidate currentIndex totalCount candidate =
                                         , " ~ "
                                         , renderDetailedElapsed elapsedSeconds
                                         , "\t"
-                                        , T.pack (renderPercentage3 savedPercent)
+                                        , Logging.renderPercentReduction savedPercent
                                         , " "
                                         , T.pack (renderFileSizeSI finalSize)
                                         , " / "
@@ -458,11 +437,8 @@ processCandidate currentIndex totalCount candidate =
                                 case copyResult of
                                     Left copyError ->
                                         logWarning $
-                                            "["
-                                                <> tshow currentIndex
-                                                <> "/"
-                                                <> tshow totalCount
-                                                <> "] Copy-for-extension failed for "
+                                            Logging.renderIndexCounter currentIndex totalCount
+                                                <> " Copy-for-extension failed for "
                                                 <> fileLabel
                                                 <> ": "
                                                 <> copyError
@@ -695,15 +671,8 @@ logExtra = logAt LevelExtra
 
 logAt :: LogLevel -> Text -> AppM ()
 logAt level message = do
-    Logger{..} <- asks runtimeLogger
-    when (shouldLog loggerVerbosity level) $
-        liftIO $
-            unLogAction loggerSink (prefixForLevel level <> message)
-  where
-    prefixForLevel LevelError = "[X] "
-    prefixForLevel LevelWarning = "[!] "
-    prefixForLevel LevelInfo = "    "
-    prefixForLevel LevelExtra = "[+] "
+    logger <- asks runtimeLogger
+    liftIO (Logging.logAt logger level message)
 
 safeDoesDirectoryExist :: Path.OsPath -> AppM Bool
 safeDoesDirectoryExist path = do
