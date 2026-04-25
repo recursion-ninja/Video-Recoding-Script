@@ -4,23 +4,26 @@
 
 module ShrinkVideos.Logging
     ( Logger
+    , LogMessage
     , buildLogger
     , logAt
+    , logStyledAt
+    , plain
     , renderIndexCounter
     , renderPaddedIndexCounter
     , renderPercentReduction
     ) where
 
-import Control.Monad (when)
-import Data.Colour.SRGB qualified as SRGB
+import Control.Monad (forM_, when)
+import Data.String (IsString (..))
 import Data.Text (Text)
-import Data.Word (Word8)
 import Numeric (showFFloat)
 import System.IO (Handle, stdout)
 
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import System.Console.ANSI qualified as Ansi
+import System.Console.ANSI qualified as ANSI
+import System.Console.ANSI.Types qualified as ANSITypes
 
 import ShrinkVideos.Domain
     ( LogLevel (..)
@@ -31,19 +34,43 @@ import ShrinkVideos.Domain
 data Logger = Logger
     { loggerVerbosity :: !Verbosity
     , loggerTerminalHandle :: !Handle
-    , loggerAnsiSupport :: !AnsiSupport
+    , loggerANSISupport :: !ANSISupport
     }
 
 
-data AnsiSupport
-    = AnsiEnabled
-    | AnsiDisabled
+data ANSISupport
+    = ANSIEnabled
+    | ANSIDisabled
 
 
 data HighlightKind
     = HighlightCounter
     | HighlightPositivePercent
     | HighlightNonPositivePercent
+
+
+newtype LogMessage = LogMessage
+    { logMessageFragments :: [LogFragment]
+    }
+
+
+data LogFragment
+    = PlainText !Text
+    | HighlightedText !HighlightKind !Text
+
+
+instance Semigroup LogMessage where
+    LogMessage leftFragments <> LogMessage rightFragments =
+        LogMessage (leftFragments <> rightFragments)
+
+
+instance Monoid LogMessage where
+    mempty = LogMessage []
+
+
+instance IsString LogMessage where
+    fromString =
+        plain . T.pack
 
 
 {- |
@@ -66,10 +93,10 @@ ANSI styling only when the terminal supports it.
 buildLogger :: Verbosity -> IO Logger
 buildLogger loggerVerbosity = do
     let loggerTerminalHandle = stdout
-    supportsAnsi <- Ansi.hSupportsANSI loggerTerminalHandle
-    let loggerAnsiSupport = case supportsAnsi of
-            True -> AnsiEnabled
-            False -> AnsiDisabled
+    supportsANSI <- ANSI.hNowSupportsANSI loggerTerminalHandle
+    let loggerANSISupport = case supportsANSI of
+            True -> ANSIEnabled
+            False -> ANSIDisabled
     pure Logger{..}
 
 
@@ -91,14 +118,31 @@ ANSI escape sequences when supported, while redirected output remains plain.
 </details>
 -}
 logAt :: Logger -> LogLevel -> Text -> IO ()
-logAt Logger{..} level message =
+logAt logger level =
+    logStyledAt logger level . plain
+
+
+{- |
+@since 1.0.0
+/O(n)/ in the length of the rendered log message.
+/O(n)/ in the length of the rendered log message.
+
+Emits a structured log entry using the requested level, styling highlighted
+fragments through the @ansi-terminal@ API when supported.
+-}
+logStyledAt :: Logger -> LogLevel -> LogMessage -> IO ()
+logStyledAt Logger{..} level message =
     when
         (shouldLog loggerVerbosity level)
-        ( let renderedMessage = case loggerAnsiSupport of
-                    AnsiEnabled -> renderAnsiLogEntry level message
-                    AnsiDisabled -> renderPlainLogEntry level message
-          in TIO.hPutStrLn loggerTerminalHandle renderedMessage
-        )
+        $ case loggerANSISupport of
+            ANSIEnabled -> writeANSILogEntry loggerTerminalHandle level message
+            ANSIDisabled -> TIO.hPutStrLn loggerTerminalHandle (renderPlainLogEntry level message)
+
+
+plain :: Text -> LogMessage
+plain text
+    | T.null text = mempty
+    | otherwise = LogMessage [PlainText text]
 
 
 {- |
@@ -113,14 +157,14 @@ message. The logger will render the segment in bold on ANSI-capable terminals.
 <summary>Examples</summary>
 
 @
->>> renderIndexCounter 1 10
-"[  1 / 10 ]"
+renderIndexCounter 1 10
+-- renders as "[  1 / 10 ]"
 @
 </details>
 -}
-renderIndexCounter :: Word -> Word -> Text
+renderIndexCounter :: Word -> Word -> LogMessage
 renderIndexCounter currentIndex totalCount =
-    wrapHighlightedText HighlightCounter (renderVisibleIndexCounter currentIndex totalCount)
+    highlighted HighlightCounter (renderVisibleIndexCounter currentIndex totalCount)
 
 
 {- |
@@ -135,12 +179,12 @@ and its trailing padding are emitted as a single bold segment.
 <summary>Examples</summary>
 
 @
->>> renderPaddedIndexCounter 1 10
-"[  1 / 10 ]    "
+renderPaddedIndexCounter 1 10
+-- renders as "[  1 / 10 ]    "
 @
 </details>
 -}
-renderPaddedIndexCounter :: Word -> Word -> Text
+renderPaddedIndexCounter :: Word -> Word -> LogMessage
 renderPaddedIndexCounter currentIndex totalCount =
     let visibleCounter = renderVisibleIndexCounter currentIndex totalCount
         visibleCounterWidth = fromIntegral (T.length visibleCounter) :: Word
@@ -148,7 +192,7 @@ renderPaddedIndexCounter currentIndex totalCount =
             case counterDisplayWidth > visibleCounterWidth of
                 True -> counterDisplayWidth - visibleCounterWidth
                 False -> 0
-    in wrapHighlightedText
+    in highlighted
         HighlightCounter
         (visibleCounter <> T.replicate (fromIntegral paddingWidth) " ")
 
@@ -159,79 +203,72 @@ renderPaddedIndexCounter currentIndex totalCount =
 /O(1)/
 
 Renders a percentage-reduction segment such as @85.112%@ for inclusion in a log
-message. Positive values are bold green; zero and negative values are bold orange.
+message. Positive values are bold green; zero and negative values are bold
+magenta.
 
 <details>
 <summary>Examples</summary>
 
 @
->>> renderPercentReduction 85.112
-"85.112%"
->>> renderPercentReduction 0
-"0.000%"
+renderPercentReduction 85.112
+-- renders as "85.112%"
+renderPercentReduction 0
+-- renders as "0.000%"
 @
 </details>
 -}
-renderPercentReduction :: Double -> Text
+renderPercentReduction :: Double -> LogMessage
 renderPercentReduction reductionPercent =
     let highlightKind = case reductionPercent > 0 of
             True -> HighlightPositivePercent
             False -> HighlightNonPositivePercent
-    in wrapHighlightedText highlightKind (formatPercentage reductionPercent)
+    in highlighted highlightKind (formatPercentage reductionPercent)
 
 
-renderPlainLogEntry :: LogLevel -> Text -> Text
+highlighted :: HighlightKind -> Text -> LogMessage
+highlighted highlightKind text
+    | T.null text = mempty
+    | otherwise = LogMessage [HighlightedText highlightKind text]
+
+
+renderPlainLogEntry :: LogLevel -> LogMessage -> Text
 renderPlainLogEntry level message =
-    renderLevelPrefix level <> stripHighlightMarkup message
+    renderLevelPrefix level <> flattenLogMessage message
 
 
-renderAnsiLogEntry :: LogLevel -> Text -> Text
-renderAnsiLogEntry level message =
-    renderLevelStyle level
-        <> renderLevelPrefix level
-        <> renderAnsiMarkup level message
-        <> renderSgrCode [Ansi.Reset]
+writeANSILogEntry :: Handle -> LogLevel -> LogMessage -> IO ()
+writeANSILogEntry terminalHandle level message = do
+    writeStyledText terminalHandle (levelStyle level) (renderLevelPrefix level)
+    forM_ (logMessageFragments message) (writeStyledFragment terminalHandle level)
+    ANSI.hSetSGR terminalHandle [ANSITypes.Reset]
+    TIO.hPutStr terminalHandle "\n"
 
 
-renderAnsiMarkup :: LogLevel -> Text -> Text
-renderAnsiMarkup level message =
-    case T.uncons message of
-        Nothing -> ""
-        Just (nextCharacter, _)
-            | nextCharacter == counterOpenMarker ->
-                renderHighlightedSegment level HighlightCounter (T.tail message)
-            | nextCharacter == positivePercentOpenMarker ->
-                renderHighlightedSegment level HighlightPositivePercent (T.tail message)
-            | nextCharacter == nonPositivePercentOpenMarker ->
-                renderHighlightedSegment level HighlightNonPositivePercent (T.tail message)
-            | nextCharacter == closeMarker ->
-                renderLevelStyle level <> renderAnsiMarkup level (T.tail message)
-            | otherwise ->
-                let (plainText, remainingText) = T.span (not . isMarkupCharacter) message
-                in plainText <> renderAnsiMarkup level remainingText
+writeStyledFragment :: Handle -> LogLevel -> LogFragment -> IO ()
+writeStyledFragment terminalHandle level = \case
+    PlainText text ->
+        writeStyledText terminalHandle (levelStyle level) text
+    HighlightedText highlightKind text ->
+        writeStyledText terminalHandle (highlightStyle level highlightKind) text
 
 
-renderHighlightedSegment :: LogLevel -> HighlightKind -> Text -> Text
-renderHighlightedSegment level highlightKind message =
-    let (highlightedText, remainder) = T.break (== closeMarker) message
-    in case T.uncons remainder of
-        Nothing ->
-            renderHighlightStyle highlightKind
-                <> highlightedText
-        Just (_, remainingMessage) ->
-            renderHighlightStyle highlightKind
-                <> highlightedText
-                <> renderLevelStyle level
-                <> renderAnsiMarkup level remainingMessage
+writeStyledText :: Handle -> [ANSITypes.SGR] -> Text -> IO ()
+writeStyledText _ _ text
+    | T.null text = pure ()
+writeStyledText terminalHandle sgrs text = do
+    ANSI.hSetSGR terminalHandle (ANSITypes.Reset : sgrs)
+    TIO.hPutStr terminalHandle text
 
 
-wrapHighlightedText :: HighlightKind -> Text -> Text
-wrapHighlightedText highlightKind highlightedText =
-    let openMarker = case highlightKind of
-            HighlightCounter -> counterOpenMarker
-            HighlightPositivePercent -> positivePercentOpenMarker
-            HighlightNonPositivePercent -> nonPositivePercentOpenMarker
-    in T.cons openMarker (highlightedText <> T.singleton closeMarker)
+flattenLogMessage :: LogMessage -> Text
+flattenLogMessage =
+    foldMap renderLogFragmentText . logMessageFragments
+
+
+renderLogFragmentText :: LogFragment -> Text
+renderLogFragmentText = \case
+    PlainText text -> text
+    HighlightedText _ text -> text
 
 
 renderVisibleIndexCounter :: Word -> Word -> Text
@@ -255,19 +292,6 @@ formatPercentage reductionPercent =
     T.pack (showFFloat (Just 3) reductionPercent "" <> "%")
 
 
-stripHighlightMarkup :: Text -> Text
-stripHighlightMarkup =
-    T.filter (not . isMarkupCharacter)
-
-
-isMarkupCharacter :: Char -> Bool
-isMarkupCharacter character =
-    character == counterOpenMarker
-        || character == positivePercentOpenMarker
-        || character == nonPositivePercentOpenMarker
-        || character == closeMarker
-
-
 renderLevelPrefix :: LogLevel -> Text
 renderLevelPrefix = \case
     LevelError -> "[X] "
@@ -276,72 +300,36 @@ renderLevelPrefix = \case
     LevelExtra -> "[+] "
 
 
-renderLevelStyle :: LogLevel -> Text
-renderLevelStyle level =
-    renderSgrCode
-        [ Ansi.SetColor Ansi.Foreground Ansi.Vivid (levelColor level)
-        ]
+levelStyle :: LogLevel -> [ANSITypes.SGR]
+levelStyle level =
+    [ ANSITypes.SetColor ANSITypes.Foreground ANSITypes.Vivid (levelColor level)
+    ]
 
 
-levelColor :: LogLevel -> Ansi.Color
+levelColor :: LogLevel -> ANSITypes.Color
 levelColor = \case
-    LevelError -> Ansi.Red
-    LevelWarning -> Ansi.Yellow
-    LevelInfo -> Ansi.White
-    LevelExtra -> Ansi.Cyan
+    LevelError -> ANSITypes.Red
+    LevelWarning -> ANSITypes.Yellow
+    LevelInfo -> ANSITypes.White
+    LevelExtra -> ANSITypes.Cyan
 
 
-renderHighlightStyle :: HighlightKind -> Text
-renderHighlightStyle highlightKind =
+highlightStyle :: LogLevel -> HighlightKind -> [ANSITypes.SGR]
+highlightStyle level highlightKind =
     case highlightKind of
         HighlightCounter ->
-            renderSgrCode
-                [ Ansi.SetConsoleIntensity Ansi.BoldIntensity
-                ]
+            levelStyle level
+                <> [ ANSITypes.SetConsoleIntensity ANSITypes.BoldIntensity
+                   ]
         HighlightPositivePercent ->
-            renderSgrCode
-                [ Ansi.SetConsoleIntensity Ansi.BoldIntensity
-                , Ansi.SetColor Ansi.Foreground Ansi.Vivid Ansi.Green
-                ]
+            [ ANSITypes.SetConsoleIntensity ANSITypes.BoldIntensity
+            , ANSITypes.SetColor ANSITypes.Foreground ANSITypes.Vivid ANSITypes.Green
+            ]
         HighlightNonPositivePercent ->
-            renderSgrCode
-                [ Ansi.SetConsoleIntensity Ansi.BoldIntensity
-                , Ansi.SetRGBColor Ansi.Foreground (SRGB.sRGB24 orangeRed orangeGreen orangeBlue)
-                ]
-
-
-renderSgrCode :: [Ansi.SGR] -> Text
-renderSgrCode =
-    T.pack . Ansi.setSGRCode
+            [ ANSITypes.SetConsoleIntensity ANSITypes.BoldIntensity
+            , ANSITypes.SetColor ANSITypes.Foreground ANSITypes.Vivid ANSITypes.Magenta
+            ]
 
 
 counterDisplayWidth :: Word
 counterDisplayWidth = 15
-
-
-counterOpenMarker :: Char
-counterOpenMarker = '\xE000'
-
-
-positivePercentOpenMarker :: Char
-positivePercentOpenMarker = '\xE001'
-
-
-nonPositivePercentOpenMarker :: Char
-nonPositivePercentOpenMarker = '\xE002'
-
-
-closeMarker :: Char
-closeMarker = '\xE003'
-
-
-orangeRed :: Word8
-orangeRed = 255
-
-
-orangeGreen :: Word8
-orangeGreen = 165
-
-
-orangeBlue :: Word8
-orangeBlue = 0

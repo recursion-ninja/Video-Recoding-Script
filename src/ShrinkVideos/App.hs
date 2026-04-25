@@ -380,12 +380,12 @@ processCandidate currentIndex totalCount candidate =
                 localZone <- liftIO getCurrentTimeZone
                 startedText <- liftIO (renderLocalTimestamp localZone =<< getCurrentTime)
                 fileLabel <- pathToText (Path.takeFileName (candidateVideoPath candidate))
-                logInfo $ mconcat
-                    [ startedText
+                logStyledInfo $ mconcat
+                    [ Logging.plain startedText
                     , " @ "
                     , Logging.renderPaddedIndexCounter currentIndex totalCount
                     , "\t"
-                    , fileLabel
+                    , Logging.plain fileLabel
                     ]
 
                 encodeResult <-
@@ -396,12 +396,14 @@ processCandidate currentIndex totalCount candidate =
                         tempPath
                 case encodeResult of
                     Left ffmpegError ->
-                        logWarning $
-                            Logging.renderIndexCounter currentIndex totalCount
+                        logStyledWarning $
+                            mconcat
+                                [ Logging.renderIndexCounter currentIndex totalCount
                                 <> " Failed x265 encode for "
-                                <> fileLabel
+                                , Logging.plain fileLabel
                                 <> ": "
-                                <> ffmpegError
+                                , Logging.plain ffmpegError
+                                ]
                     Right outcome ->
                         case decideRecodeDecision
                             (encodingOutcomeOriginalFileSize outcome)
@@ -415,17 +417,17 @@ processCandidate currentIndex totalCount candidate =
                                             else ((fromIntegral (candidateVideoSize candidate) - fromIntegral finalSize) / fromIntegral (candidateVideoSize candidate) :: Double) * 100
                                     elapsedSeconds =
                                         max 0 (ceiling (diffUTCTime (encodingOutcomeStoppedAt outcome) (encodingOutcomeStartedAt outcome)) :: Integer)
-                                logInfo $
-                                    T.concat
-                                        [ stoppedText
+                                logStyledInfo $
+                                    mconcat
+                                        [ Logging.plain stoppedText
                                         , " ~ "
-                                        , renderDetailedElapsed elapsedSeconds
+                                        , Logging.plain (renderDetailedElapsed elapsedSeconds)
                                         , "\t"
                                         , Logging.renderPercentReduction savedPercent
                                         , " "
-                                        , T.pack (renderFileSizeSI finalSize)
+                                        , Logging.plain (T.pack (renderFileSizeSI finalSize))
                                         , " / "
-                                        , T.pack (renderFileSizeSI (candidateVideoSize candidate))
+                                        , Logging.plain (T.pack (renderFileSizeSI (candidateVideoSize candidate)))
                                         ]
                             ReencodeCopyForExtension -> do
                                 copyResult <-
@@ -436,12 +438,14 @@ processCandidate currentIndex totalCount candidate =
                                         tempPath
                                 case copyResult of
                                     Left copyError ->
-                                        logWarning $
-                                            Logging.renderIndexCounter currentIndex totalCount
+                                        logStyledWarning $
+                                            mconcat
+                                                [ Logging.renderIndexCounter currentIndex totalCount
                                                 <> " Copy-for-extension failed for "
-                                                <> fileLabel
+                                                , Logging.plain fileLabel
                                                 <> ": "
-                                                <> copyError
+                                                , Logging.plain copyError
+                                                ]
                                     Right copyOutcome -> do
                                         finalSize <- replaceOriginalWithTemp candidate tempPath
                                         logInfo $
@@ -669,10 +673,21 @@ logInfo = logAt LevelInfo
 logExtra :: Text -> AppM ()
 logExtra = logAt LevelExtra
 
+logStyledWarning :: Logging.LogMessage -> AppM ()
+logStyledWarning = logStyledAt LevelWarning
+
+logStyledInfo :: Logging.LogMessage -> AppM ()
+logStyledInfo = logStyledAt LevelInfo
+
 logAt :: LogLevel -> Text -> AppM ()
 logAt level message = do
     logger <- asks runtimeLogger
     liftIO (Logging.logAt logger level message)
+
+logStyledAt :: LogLevel -> Logging.LogMessage -> AppM ()
+logStyledAt level message = do
+    logger <- asks runtimeLogger
+    liftIO (Logging.logStyledAt logger level message)
 
 safeDoesDirectoryExist :: Path.OsPath -> AppM Bool
 safeDoesDirectoryExist path = do
