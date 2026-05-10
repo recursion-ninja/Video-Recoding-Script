@@ -18,7 +18,7 @@ import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Function (on)
-import Data.List (sortBy)
+import Data.List (dropWhileEnd, sortBy)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text)
@@ -29,10 +29,12 @@ import System.Directory.OsPath
     ( doesDirectoryExist
     , doesFileExist
     , getFileSize
+    , getModificationTime
     , getTemporaryDirectory
     , listDirectory
     , removeFile
     , renamePath
+    , setModificationTime
     )
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hClose, hIsEOF, openTempFile)
@@ -248,16 +250,20 @@ foldVideoFiles rootPath shouldRecurse initialAcc step = walk initialAcc rootPath
                 else do
                     isFile <- safeDoesFileExist childPath
                     if isFile
-                        then
-                            case isVideoFile childPath of
-                                Nothing -> pure acc
-                                Just videoFormat -> do
-                                    videoFile <- collectVideoFile rootPath childPath videoFormat
-                                    case videoFile of
+                        then do
+                            hasCopiedCheckMark <- liftIO (hasCopiedVideoCheckMark childPath)
+                            if hasCopiedCheckMark
+                                then pure acc
+                                else
+                                    case isVideoFile childPath of
                                         Nothing -> pure acc
-                                        Just resolvedVideoFile -> do
-                                            acc' <- step acc resolvedVideoFile
-                                            pure $! acc'
+                                        Just videoFormat -> do
+                                            videoFile <- collectVideoFile rootPath childPath videoFormat
+                                            case videoFile of
+                                                Nothing -> pure acc
+                                                Just resolvedVideoFile -> do
+                                                    acc' <- step acc resolvedVideoFile
+                                                    pure $! acc'
                         else pure acc
         walkEntries nextAcc currentPath entries
 
@@ -528,13 +534,17 @@ ffmpegCopyForExtension outputFormat originalFileSize inputPath tempPath = do
 replaceOriginalWithTemp :: CandidateVideo -> Path.OsPath -> AppM FileSize
 replaceOriginalWithTemp candidate tempPath = do
     RuntimeEnv{runtimeOptions = Options{..}, runtimeSummary = summaryRef} <- ask
-    let finalPath = Path.replaceExtension (candidateVideoPath candidate) (toOsPath optionsOutputFormat)
+    let unmarkedFinalPath = Path.replaceExtension (candidateVideoPath candidate) (toOsPath optionsOutputFormat)
+    finalPath <- liftIO (withCopiedVideoCheckMark unmarkedFinalPath)
     finalPathText <- displayPathFromRoot optionsRootPath finalPath
+    originalModifiedAt <- liftIO (getModificationTime (candidateVideoPath candidate))
 
     liftIO $ do
-        when (finalPath /= candidateVideoPath candidate) (removeFileIfExists finalPath)
+        when (unmarkedFinalPath /= candidateVideoPath candidate) (removeFileIfExists unmarkedFinalPath)
+        when (finalPath /= unmarkedFinalPath) (removeFileIfExists finalPath)
         removeFileIfExists (candidateVideoPath candidate)
         renamePath tempPath finalPath
+        setModificationTime finalPath originalModifiedAt
 
     finalSizeResult <- liftIO (try (getFileSize finalPath) :: IO (Either IOException Integer))
     case finalSizeResult of
@@ -562,6 +572,28 @@ replaceOriginalWithTemp candidate tempPath = do
                                     , recodeResultFinalBytes = finalSize
                                     }
                     pure finalSize
+
+hasCopiedVideoCheckMark :: Path.OsPath -> IO Bool
+hasCopiedVideoCheckMark path = do
+    baseName <- Path.decodeFS (Path.takeBaseName path)
+    pure $
+        case reverse baseName of
+            character:_ -> character == copiedVideoCheckMark
+            [] -> False
+
+withCopiedVideoCheckMark :: Path.OsPath -> IO Path.OsPath
+withCopiedVideoCheckMark path = do
+    let baseNamePath = Path.takeBaseName path
+    baseName <- Path.decodeFS baseNamePath
+    normalizedBaseName <- Path.encodeFS (ensureSingleTrailingCheckMark baseName)
+    pure (Path.replaceBaseName path normalizedBaseName)
+
+ensureSingleTrailingCheckMark :: String -> String
+ensureSingleTrailingCheckMark baseName =
+    dropWhileEnd (== copiedVideoCheckMark) baseName <> [copiedVideoCheckMark]
+
+copiedVideoCheckMark :: Char
+copiedVideoCheckMark = '✓'
 
 ffmpegStandardizedFlags :: VideoFormat -> Path.OsPath -> Path.OsPath -> [String] -> AppM [String]
 ffmpegStandardizedFlags outputFormat inputPath tempPath flags = do
@@ -647,7 +679,7 @@ reportSummary startedAt stoppedAt Summary{..} = do
             let originalBytesInteger = toInteger summaryOriginalBytes
             in  if originalBytesInteger == 0
                 then 0
-                else 100 * (fromIntegral summaryFinalBytes / fromIntegral summaryOriginalBytes :: Double)
+                else 100 * (1 - (fromIntegral summaryFinalBytes / fromIntegral summaryOriginalBytes :: Double))
     TIO.putStrLn $
         "\nFiles re-encoded: "
             <> tshow summaryFilesReencoded

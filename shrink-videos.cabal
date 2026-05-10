@@ -1,6 +1,6 @@
 cabal-version:   3.16
 name:            shrink-videos
-version:         1.0.0
+version:         1.0.1
 license:         CC0-1.0
 license-file:    doc/LICENSE
 author:          Recursion Ninja
