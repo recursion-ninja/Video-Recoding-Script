@@ -1,6 +1,10 @@
 # Revision history for video-recoder
 
 
+## Unreleased changes
+
+* Adding GHC 9.14 support
+
 ## `v1.0.1`` -- 2026-05-10
 
 * Adding a completed `'✓'` character to processed video files to prevent repeat processing.

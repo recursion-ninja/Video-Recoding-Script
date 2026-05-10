@@ -10,6 +10,10 @@ description:     Scans a directory for non-x265 video files and re-encodes them 
 build-type:      Simple
 extra-doc-files: doc/CHANGELOG.md
 
+tested-with:
+  ghc ==9.12
+  ghc ==9.14
+
 common warnings
     ghc-options: -Wall
 
@@ -29,7 +33,7 @@ executable Shrink-Videos
     build-depends:
         ansi-terminal >=0.11 && <1.2,
         async >=2.2 && <2.3,
-        base ^>=4.21.0.0,
+        base >=4.21.0.0,
         containers >=0.6 && <0.8,
         directory >=1.3 && <1.5,
         filepath >=1.4 && <1.6,
